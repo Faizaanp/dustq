@@ -1,0 +1,5 @@
+Vendored upstream: https://github.com/qlabs-eng/dust
+Pinned commit: b20f7c03eac630b6441ba6f254128c1761dc45ad
+Vendored on: 2026-10-11 (its .git removed; this file records the pin)
+License: MIT (see LICENSE in this directory)
+Never edit files in this directory; all behaviour changes live in dustq/ (Plan v3.1 section 4).

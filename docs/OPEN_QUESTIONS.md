@@ -24,8 +24,8 @@ Seeded 2026-10-10 during the plan v2 expansion. Updated by any agent who resolve
 
 ## T0 must resolve (novelty)
 
-11. [first pass clean 2026-10-10] Full-text reads of QuZO (arXiv:2502.12346), QZO (arXiv:2505.13430), ZeroQAT (arXiv:2509.00031), HQZO: confirm none claims activation-space perturbation under a quantized forward.
-12. [unverified] Additional searches still to run: forward gradients + quantization; node perturbation + low-bit; BitNet b1.58 exact identifier; ES-trained binarized/ternary nets; "Dust" citations and follow-ups appearing after Oct 2026.
+11. [resolved 2026-10-11, docs/related_work.md — 31 verified refs] Full-text/abstract reads of QuZO, QZO, ZeroQAT, HQZO (Crossref), FOGZO (NeurIPS 2025, arXiv:2510.23926 — top overlap risk; STE+ZO QAT pretraining, weight-space, keeps STE), ZOQO (ICASSP 2025, arXiv:2501.06736), GFT (arXiv:2410.09734), QZO-FF, BitNet b1.58/a4.8, DSQ (arXiv:1908.05033 — the 1908.05046 id in earlier drafts was wrong; it is a physics paper), MeZO (arXiv:2305.17333). Verdict: **niche open** — no activation-space perturbation + low-bit quantized forward + from-scratch pretraining found.
+12. [resolved 2026-10-11; standing re-checks added] Searches run across six query families (ZO+quantized from scratch; ES+binary/ternary; forward-gradient+quantization; node perturbation+quantized; activation perturbation+quantized; Dust follow-ups). Standing items: (a) read EGGROLL's integer-datatype recurrent-LM experiment in full before submission — abstract-level only so far, and if it is quantized-weight ES pretraining it weakens even our hedged "first ZO quantized from-scratch" claim; (b) re-run Dust-citation searches monthly and before submission (no citing papers as of 2026-10-11; paper ~1 week old); (c) re-verify AGZO and ZO-Act before citing them.
 
 ## Second independent code read (2026-10-10, later session)
 

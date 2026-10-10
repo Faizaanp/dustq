@@ -6,7 +6,7 @@ Living document for the owner. Read this before deciding to stop at any point.
 
 ## Current stage (updated 2026-10-11)
 
-**Stage 1 — Phase 0 (recon) in progress.** Nothing is publishable yet. The first real publishability checkpoint is **Stage 3** (after T6/G2a). The cheapest *meaningful* stop is **Stage 4** (the ~45 L4-h minimum paper, Plan v3.1 section 6.3).
+**Stage 1 reached — Phase 0 complete** (see `docs/reports/T0.md`): upstream pinned and mapped, hypotheses pre-registered, all CPU acceptance tests green (DUSTQ bitwise-equal to DUST), appendix targets pinned, novelty niche confirmed open as of 2026-10-11 (31 verified references; top overlap risk: FOGZO). Nothing is publishable yet. The first real publishability checkpoint is **Stage 3** (after T6/G2a); the cheapest *meaningful* stop is **Stage 4** (the ~45 L4-h minimum paper, Plan v3.1 section 6.3).
 
 ## Stage map
 

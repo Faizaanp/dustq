@@ -171,8 +171,8 @@ configs/ results/ docs/ tests/
 - L8 = upstream (asserted equal).
 - L4: merge adjacent block pairs → writers [70,26,10,4], hubs [12,6,4,4]. Divisible by nrep at all four K values (checked by test).
 - Validate L4 against a small allocation search with the cosine method. Accept if the merged recipe is within 5% cosine of the searched one.
-- K=64 and other non-preset K values: Tier D only.
-- Check the head count for L4/d256 against the paper's appendix [unverified; default n_head=8 gives head_dim 32].
+- K=64 and other non-preset K values: Tier D only. The paper's 64-draw recipe is printed in Appendix E (docs/paper_tables.md): writers (8,7,4,3,1,1,1,1), MLP (8,7,4,3,2,1,1,1), one attention-output draw per block, 3 embedding draws, local q/v/gate/k/ve = (1,5,2,3,2), nrep=1 (reward centering is already skipped at nrep=1 in the code).
+- L4/d256 head count: **4 heads** — derived from Appendix A's "same head dimension" (base: 8 heads at width 512 gives head dim 64; 256/64 = 4); the count itself is not printed in the paper [derived, see docs/paper_tables.md]. qmodel uses n_head=4 for S.
 
 ### 4.4 Runner and queue
 - `runner.py` writes `results/<run_id>/` with config, metrics.jsonl, `ckpt.pt` (model + optimizer + DUSTQ RNG + step + data cursor) every 10 min, `best.pt`, and `result.json`.
@@ -275,6 +275,8 @@ Each task ends with `docs/reports/T*.md`.
   - **Re-cut section 6.**
 - **T2**: upstream data prep with `--tokens both`. Hash-check that train, val and test are disjoint. Record the manifest.
 - **T3 / G0**: Tier R. Pass: M/1M within 0.05 of Appendix C at each K, with the same K ordering. S/10M/K256 within 0.08 of 5.362.
+  - Appendix C targets (docs/paper_tables.md, 37.7M model, 3-seed means): **M/1M** Dust 256: 6.067, 1k: 5.934, 4k: 5.911; backprop 5.959. **M/10M** Dust 256: 5.231, 1k: 5.111; backprop 4.989. K ordering at 1M is 256 > 1k > 4k (the ladder then flattens: 16k is 5.916, within noise of 4k).
+  - Protocol caveat for the S-check: the Figure 4 size-study numbers (including 5.362) **predate the Section 3.1 protocol** (Appendix F: earlier token-embedding lr 0.3/base and key 4x / value 8x rates), while the vendored code implements the main protocol (wte lr 1000, base rates; Table 6 main-comparison columns match the code exactly). Expect new-protocol S runs to land slightly below the Figure 4 values (~0.02-0.05 at 10M, as it does for M: 4.989 main vs 5.015 size-study). The 0.08 tolerance covers this; do not chase small S gaps — all our claims are internal and paired.
 - **T4 / G1**: fp32 (dtype override plus fp32 embeddings) vs bf16 on M/1M/K256 at P0 and P3. Final loss and single-batch cosine within seed noise.
 
 ### Phase 2: quantization and mechanism (weeks 2–3)

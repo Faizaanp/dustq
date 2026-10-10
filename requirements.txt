@@ -1,0 +1,12 @@
+# dustq environment (Phase 0, CPU). GPU runs (Phase 1+) happen on Colab L4 with the
+# upstream CUDA stack: torch==2.10.0 cu128, tokenizers==0.23.1, datasets==4.8.4
+# (third_party/dust/requirements.txt); pin exact versions there when T1 creates the notebook.
+#
+# Local CPU install (see README):
+#   python -m venv .venv
+#   .venv\Scripts\python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch>=2.10
+pytest>=8
+# Optional, for data prep on CPU (T2):
+# tokenizers==0.23.1
+# datasets==4.8.4

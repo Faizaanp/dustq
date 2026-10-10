@@ -13,7 +13,7 @@ Seeded 2026-10-10 during the plan v2 expansion. Updated by any agent who resolve
 4. [resolved 2026-10-10, code read] bf16 is chosen in `DUST.__init__` (`bfloat16 if cuda else float32`) but is an instance attribute (`self.dtype`), so it can be overridden after construction without editing upstream. fp32 on T4 possible (slow). See Plan v3 section 2.
 5. [resolved 2026-10-10, code read] Not out of the box: `recipe()` only accepts K in {256,1024,4096,16384}; per-block allocation lists are hard-wired to 8 blocks; K=64 gives `scale=0`. Plan v3 adds `dustq/recipes.py` (L4 via block-pair merging) and drops K=64 from the core.
 6. [resolved 2026-10-10, code read] No: `--tokens` choices are {1M, 10M, both} (488/4880 sequences). 20M needs our own data script (Plan v3 `dustq/data.py`).
-7. [verified 2026-10-10, recheck at pin] Repo license is MIT; 5 commits on main; pin the exact commit hash.
+7. [resolved 2026-10-11] Upstream pinned and vendored: commit b20f7c03eac630b6441ba6f254128c1761dc45ad, MIT, vendored at third_party/dust (UPSTREAM_COMMIT records the pin). The stray root prepare_data.py was verified content-identical to the pinned copy (line endings only) and is gitignored.
 8. [resolved 2026-10-10, code read] No flash-attn: attention uses `F.scaled_dot_product_attention` with an explicit mask. Open sub-item: memory ceiling at nrep=8/16 with the explicit mask (T1).
 8b. [resolved 2026-10-10, full dust.py read] Update path, head/local/scalar estimators, hard-coded sigmas and cost structure documented in Plan v3.1 section 2. Remaining: the pre-hook ordering must be verified by test (Plan v3.1 T5 tests 3-4), and the L4/d256 head count and recipe must be taken from the paper appendix (T0).
 

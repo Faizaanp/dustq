@@ -40,20 +40,22 @@ def main():
         splits[name] = data
 
     if not problems:
-        # Disjointness: no identical 2049-token row may appear in two splits.
-        pair_hashes = {}
-        for name, data in splits.items():
-            for h in row_hashes(data):
-                if h in pair_hashes and pair_hashes[h] != name:
-                    problems.append(f"row appears in both {pair_hashes[h]} and {name}")
-                pair_hashes[h] = name
+        # Disjointness where it is REQUIRED: the training pool vs held-out splits, and val vs test.
+        # (train_1M is BY DESIGN a strict prefix of train_10M — same pool, different budget.)
+        pool = row_hashes(splits["train_10M.pt"])
+        for other in ("val.pt", "test.pt"):
+            overlap = pool & row_hashes(splits[other])
+            if overlap:
+                problems.append(f"{len(overlap)} row(s) shared between train_10M and {other}")
+        vt = row_hashes(splits["val.pt"]) & row_hashes(splits["test.pt"])
+        if vt:
+            problems.append(f"{len(vt)} row(s) shared between val and test")
         # Prefix property: train_1M must be the first 488 rows of train_10M.
         if "train_1M.pt" in splits and "train_10M.pt" in splits:
             same = torch.equal(splits["train_10M.pt"][:488], splits["train_1M.pt"])
             print(f"train_1M is a strict prefix of train_10M: {same}")
             if not same:
                 problems.append("train_1M is not a prefix of train_10M")
-        # train vs held-out disjointness is by stream construction; the hash check above covers it.
 
     manifest = d / "manifest.json"
     if manifest.is_file():

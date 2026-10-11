@@ -1,4 +1,8 @@
-"""CLI for the idempotent run queue: python scripts/queue.py [--configs-dir configs] [--only substr]"""
+"""CLI for the idempotent run queue: python scripts/run_queue.py [--configs-dir configs] [--only substr]
+
+Named run_queue.py (not queue.py) to avoid shadowing the stdlib `queue` module, which
+torch imports — recorded as a deviation from the Plan v3.1 file map.
+"""
 
 import argparse
 import sys

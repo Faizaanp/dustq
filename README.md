@@ -26,7 +26,7 @@ dustq/              our package: upstream.py, config.py, recipes.py, quant.py, q
                     dust_ext.py, backprop_ext.py, runner.py, train.py (resumable Runner),
                     queue.py (idempotent)  (+ probes.py, data.py later)
 configs/            one YAML per run (scripts/make_configs.py --tier R)
-scripts/            queue.py, benchmark.py, make_configs.py, check_data.py,
+scripts/            run_queue.py, benchmark.py, make_configs.py, check_data.py,
                     colab_t1.py (paste-into-Colab T1)  (+ noise_sweep.py, aggregate.py,
                     make_figures.py later)
 results/            runs.csv, per-run logs, benchmarks, checkpoints (gitignored)

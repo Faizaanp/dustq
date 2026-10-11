@@ -10,3 +10,5 @@ runs/
 
 # Stray reference copy; the canonical file is third_party/dust/prepare_data.py
 /prepare_data.py
+
+*.zip

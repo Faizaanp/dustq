@@ -13,6 +13,7 @@ fp32 on CPU; "fp32" forces fp32 on CUDA too), fixing upstream's hard-coded bf16 
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import subprocess
 import time
@@ -22,7 +23,7 @@ import torch
 
 from . import qmodel
 from .backprop_ext import make_bp_optimizer, train_step
-from .config import RunConfig
+from .config import BP_DEFAULTS, RunConfig
 from .dust_ext import DUSTQ
 from .recipes import recipe
 from .runner import build_model, tiny_batch
@@ -30,7 +31,7 @@ from .upstream import ensure_upstream_on_path
 
 ensure_upstream_on_path()
 
-from dust import load_sequences  # noqa: E402
+from dust import DEFAULT_CONFIGS, load_sequences  # noqa: E402
 from dust import make_optimizer as dust_make_optimizer  # noqa: E402
 
 
@@ -47,6 +48,13 @@ def evaluate(model, rows, device, dtype: str = "auto", batch_size: int = 32) -> 
         total += loss.item() * y.numel()
         tokens += y.numel()
     return total / tokens
+
+
+def load_best(path, map_location):
+    """The only sanctioned reader of our best.pt: {"best": float, "state": state_dict}.
+    Not upstream's bare state_dict format (REPO_MAP documents the deviation)."""
+    payload = torch.load(path, map_location=map_location, weights_only=True)
+    return payload["best"], payload["state"]
 
 
 def _force_fp32(model, estimator):
@@ -80,18 +88,23 @@ class Runner:
         if cfg.method == "dust":
             self.model.requires_grad_(False)
             settings = recipe(cfg.tokens, cfg.population, self.model.config.n_layer)
+            # B5: the optimizer must see the config's (possibly tuned) lr/momentum, not the
+            # upstream recipe's cell defaults; with defaults they are identical.
+            settings = dataclasses.replace(settings, lr=cfg.lr, momentum=cfg.momentum)
             self.estimator = DUSTQ(self.model, settings, seed=cfg.seed, sigmas=cfg.sigmas)
             if cfg.dtype == "fp32" and self.device.type == "cuda":
                 _force_fp32(self.model, self.estimator)
             if cfg.precision != "fp":  # AFTER estimator: hook order noise -> quantize
                 _, bits, scheme = qmodel.parse_precision(cfg.precision)
-                qmodel.register_act_hooks(self.model, bits, scheme)
+                qmodel.register_act_hooks(self.model, bits, scheme,
+                                          allow_lowbit_absmax=(cfg.task == "smoke"))
             self.optimizer = dust_make_optimizer(self.model, settings)
         else:
             self.model.requires_grad_(True)
             if cfg.precision != "fp":
                 _, bits, scheme = qmodel.parse_precision(cfg.precision)
-                qmodel.register_act_hooks(self.model, bits, scheme)
+                qmodel.register_act_hooks(self.model, bits, scheme,
+                                          allow_lowbit_absmax=(cfg.task == "smoke"))
             self.optimizer = make_bp_optimizer(self.model, cfg.lr, cfg.momentum)
 
     def _load_data(self):
@@ -106,7 +119,12 @@ class Runner:
             self.test_rows = tiny_batch(torch.device("cpu"), seed=190 + cfg.seed, sequences=32,
                                         length=length, vocab=vocab)[0]
         else:
-            train = load_sequences(Path(cfg.data_dir) / f"train_{cfg.tokens}.pt", cfg.steps * 8)
+            # C2: load the budget's full subset (upstream --steps semantics), then run
+            # cfg.steps over it, so a truncated run sees exactly the full run's batches.
+            default_steps = (DEFAULT_CONFIGS.get(cfg.tokens, {}) or {}).get("steps") \
+                or (BP_DEFAULTS.get(cfg.tokens, {}) or {}).get("steps")
+            rows_needed = max(cfg.steps, default_steps or cfg.steps) * 8
+            train = load_sequences(Path(cfg.data_dir) / f"train_{cfg.tokens}.pt", rows_needed)
             order = torch.randperm(len(train), generator=torch.Generator().manual_seed(cfg.seed + 1))
             self.training = train[order]
             self.val_rows = load_sequences(Path(cfg.data_dir) / "val.pt", 544)
@@ -151,6 +169,16 @@ class Runner:
 
         if self.ckpt_path.exists():
             start, best, history = self._load_ckpt()
+            best_path = self.run_dir / "best.pt"
+            if best_path.exists():
+                try:  # C3: the file's best is authoritative after a crash
+                    best = min(best, load_best(best_path, self.device)[0])
+                except Exception:
+                    pass  # legacy bare best.pt: keep the ckpt value
+            if history_path.exists():  # M2: drop rows re-run after the last ckpt
+                kept = [l for l in history_path.read_text().splitlines()
+                        if l.strip() and json.loads(l).get("step", 0) <= start]
+                history_path.write_text("\n".join(kept) + ("\n" if kept else ""))
             if start >= cfg.steps:
                 return self._finalize(best, history)
         else:
@@ -160,7 +188,7 @@ class Runner:
                             "gpu": torch.cuda.get_device_name(0) if self.device.type == "cuda" else "cpu"},
                            indent=2) + "\n")
             best = evaluate(self.model, self.val_rows, self.device, cfg.dtype)
-            self._save_best()
+            self._save_best(best)
             history = [dict(step=0, val_loss=best)]
 
         t_start, t_ckpt = time.monotonic(), time.monotonic()
@@ -175,8 +203,8 @@ class Runner:
                 value = evaluate(self.model, self.val_rows, self.device, cfg.dtype)
                 record["val_loss"] = value
                 if best is None or value < best:
-                    best, improved = value, True
-                    self._save_best()
+                    best = value
+                    self._save_best(best)
                 history.append(record)
             if step == cfg.steps or cfg.checkpoint_minutes <= 0 or \
                     (time.monotonic() - t_ckpt) >= cfg.checkpoint_minutes * 60:
@@ -189,16 +217,21 @@ class Runner:
             self.estimator.close()
         return self._finalize(best, history)
 
-    def _save_best(self):
-        torch.save({k: v.detach().cpu() for k, v in self.model.state_dict().items()},
-                   self.run_dir / "best.pt")
+    def _save_best(self, best: float):
+        """C3: single self-describing file, atomic via tmp+replace — upstream's bare
+        state_dict format is NOT used (see load_best and REPO_MAP)."""
+        payload = {"best": float(best),
+                   "state": {k: v.detach().cpu() for k, v in self.model.state_dict().items()}}
+        tmp = self.run_dir / "best.pt.tmp"
+        torch.save(payload, tmp)
+        tmp.replace(self.run_dir / "best.pt")
 
     def _finalize(self, best, history) -> Path:
+        file_best, state = load_best(self.run_dir / "best.pt", self.device)
         model = self.model
-        model.load_state_dict(torch.load(self.run_dir / "best.pt", map_location=self.device,
-                                         weights_only=True))
+        model.load_state_dict(state)
         result = dict(
-            best_val=best,
+            best_val=file_best,
             test_at_best_val=evaluate(model, self.test_rows, self.device, self.cfg.dtype),
             history=history, steps=self.cfg.steps,
             wall_s=history[-1].get("elapsed_seconds", 0.0) if history else 0.0,

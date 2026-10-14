@@ -22,6 +22,7 @@ CU_START = None                          # e.g. float("123.4") from the Colab Re
 
 # ---- 0. environment -------------------------------------------------------
 import torch
+T_CELL0 = time.monotonic()  # cell wall clock (M4: time.monotonic() alone is machine uptime)
 print("torch", torch.__version__, "| cuda", torch.version.cuda)
 assert torch.cuda.is_available(), "Restart with an L4 GPU runtime"
 print("gpu:", torch.cuda.get_device_name(0), "| vram:", round(torch.cuda.get_device_properties(0).total_memory / 2**30, 1), "GB")
@@ -40,10 +41,14 @@ else:
 print("repo at:", Path.cwd())
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "pyyaml"], check=True)
 
-# ---- 2. sanity: the Phase 0 bitwise contract on GPU ------------------------
-subprocess.run([sys.executable, "-m", "pytest", "tests/test_phase0.py",
-                "-k", "recipes or sigmas", "-q"], check=True)
-print("sanity ok")
+# ---- 2. sanity: three parts, each with a distinct job ----------------------
+# (i) code integrity (runs on CPU even on Colab): Phase 0 suite incl. the bitwise contract
+subprocess.run([sys.executable, "-m", "pytest", "tests/test_phase0.py", "-q"], check=True)
+# (ii) the CUDA path through Runner (the in-repo path that would have caught B4): resume subset
+subprocess.run([sys.executable, "-m", "pytest", "tests/test_t1.py", "-k", "resume", "-q"], check=True)
+# (iii) per-precision CUDA steps: one tiny DUST + one BP step on the GPU (the B4-catcher)
+subprocess.run([sys.executable, "-m", "pytest", "tests/test_cuda.py", "-q"], check=True)
+print("sanity ok (integrity + CUDA path + per-precision GPU steps)")
 
 # ---- 3. benchmark at real scale -------------------------------------------
 t_bench = time.monotonic()
@@ -59,7 +64,7 @@ print(f"resume test wall: {(time.monotonic() - t_res)/60:.1f} min")
 print("\n" + Path("results/benchmark_cuda.md").read_text())
 print("\nPaste the file contents above back to the agent, together with:")
 print("  - CU/h from the Resources tab (and CU_START if you set it)",
-      f"session wall so far: {(time.monotonic())/60:.0f} min (this cell only)")
+      f"cell wall: {(time.monotonic() - T_CELL0) / 60:.0f} min")
 if CU_START is not None:
     print("  (remember to read CU again now for the burn rate)")
 print("\nOptional next: zip the repo and upload data files to Drive per docs/reports/T1.md.")

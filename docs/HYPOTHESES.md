@@ -36,7 +36,7 @@ weights). Optional, Tier D only: BP-LSQ, ZO-W (weight-space ZO).
 **I = [Dust-1k − BP-STE]@P3 − [Dust-1k − BP]@P0** on S/1M tokens (P3 = W1.58A4), test loss
 at the best-validation checkpoint, paired by seed (upstream pairs make_model(seed) with
 data order seed+1 for all methods). 95% CI by paired bootstrap, 10,000 resamples.
-**H2 is claimed only if the CI excludes 0.** With D2, n = 5 seeds; otherwise n = 3.
+**H2 is claimed only if the CI excludes 0.** n = 5 seeds on the primary cell and its fp counterpart, unconditional (D2 is approved; a conditional n would allow optional stopping on the confirmatory endpoint).
 
 **Key secondary:** [Dust-1k − BP-SSTE]@P3 (H3), same procedure, labelled exploratory.
 

@@ -10,8 +10,10 @@ import math
 import pytest
 import torch
 
-from dustq import recipes, runner
+from dustq import qmodel, recipes, runner
+from dustq.config import SIZES
 from dustq.dust_ext import DUSTQ
+from dustq.quant import swap_linear, ste_act_quantize
 from dustq.upstream import ensure_upstream_on_path
 
 ensure_upstream_on_path()
@@ -116,3 +118,46 @@ def test_quantizer_semantics():
     x2 = torch.randn(4, 16, requires_grad=True)
     ste_act_quantize(x2, 8).sum().backward()
     assert torch.all(x2.grad == 1), "identity STE must pass gradient 1 everywhere"
+
+# --- Review-fix tests (docs/specs/2026-10-11-review-fixes-design.md) ---
+
+@pytest.mark.parametrize("size", sorted(SIZES))
+def test_size_forwards(size):
+    # B1: every experiment size must build and forward (n_kv_head now matches n_head).
+    model = runner.build_model(SIZES[size], "fp", "cpu", seed=0)
+    assert model.config.n_kv_head == model.config.n_head
+    out = model(torch.randint(0, 4096, (2, 64)))
+    assert out.shape == (2, 64, 4096) and torch.isfinite(out).all()
+
+
+def test_precision_spellings():
+    # B3: dotted and run-id spellings both accepted.
+    assert qmodel.parse_precision("w1.58a4") == ("ternary", 4, "absmax")
+    assert qmodel.parse_precision("w1p58a4") == ("ternary", 4, "absmax")
+    assert qmodel.parse_precision("W1_58_A2") == ("ternary", 2, "absmax")
+
+
+def test_swap_preserves_dtype_and_device():
+    # B4: the QLinear swap must be transparent to device and dtype.
+    src = torch.nn.Linear(8, 8, bias=False).to(torch.bfloat16)
+    q = swap_linear(src, "ternary")
+    assert q.weight.dtype == src.weight.dtype and q.weight.device == src.weight.device
+    assert q.effective_weight().dtype == src.weight.dtype
+
+
+def test_act_quantizer_fp32_math():
+    # C1: quantizer math runs in fp32 regardless of input dtype.
+    xb = (torch.randn(64, 128) * 3).bfloat16()
+    out = ste_act_quantize(xb, 8)
+    assert out.dtype == torch.float32
+    assert torch.equal(out, ste_act_quantize(xb.float(), 8))
+
+
+def test_lowbit_absmax_guard():
+    # C5: bits <= 4 with absmax is refused outside smoke/benchmark mode.
+    model = runner.build_model(precision="w1.58a4", seed=0)
+    with pytest.raises(ValueError):
+        qmodel.register_act_hooks(model, 4, "absmax")
+    handles = qmodel.register_act_hooks(model, 4, "absmax", allow_lowbit_absmax=True)
+    for h in handles:
+        h.remove()

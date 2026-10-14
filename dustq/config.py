@@ -26,10 +26,10 @@ except Exception:  # vendored path layout differences; fall back to constants fr
                    "10M": dict(lr=0.2, momentum=0.95, steps=610, eval_interval=10)}
 
 SIZES = {
-    "L2d128": dict(n_layer=2, n_embd=128, n_head=2),
-    "L4d256": dict(n_layer=4, n_embd=256, n_head=4),
-    "L8d512": dict(n_layer=8, n_embd=512, n_head=8),
-    "L16d1024": dict(n_layer=16, n_embd=1024, n_head=16),
+    "L2d128": dict(n_layer=2, n_embd=128, n_head=2, n_kv_head=2),
+    "L4d256": dict(n_layer=4, n_embd=256, n_head=4, n_kv_head=4),
+    "L8d512": dict(n_layer=8, n_embd=512, n_head=8, n_kv_head=8),
+    "L16d1024": dict(n_layer=16, n_embd=1024, n_head=16, n_kv_head=16),
 }
 
 CSV_COLUMNS = [

@@ -88,7 +88,13 @@ lives in `dustq/`.
   value embeddings, LM head and its input, norms, λ scalars (keeps `local_errors` and
   `head_error` exact).
 
-## Reproduction targets (test loss @ best val; Appendix C, extracted in docs/paper_tables.md)
+## Reproduction targets (test loss @ best val)
 
-- L4/d256 @ 10M: backprop 5.066; Dust 64: 5.556, 256: 5.362, 1k: 5.161, 4k: 5.095, 16k: 5.065 [paper].
+- M (L8/d512) targets are from **Appendix C** (docs/paper_tables.md): 1M — Dust 256/1k/4k = 6.067/5.934/5.911, backprop 5.959; 10M — Dust 256/1k = 5.231/5.111, backprop 4.989.
+- S (L4/d256) @ 10M is from **main-post Figure 4** (the size-study table; it predates the main protocol — see Plan v3.1 T3 for the caveat): backprop 5.066; Dust 64: 5.556, 256: 5.362, 1k: 5.161, 4k: 5.095, 16k: 5.065 [paper].
 - G0 pass: M/1M within 0.05 of Appendix C per K, same K ordering; S/10M/K256 within 0.08 of 5.362.
+
+## Our format deviations (dustq, not upstream)
+
+- `results/<run_id>/best.pt` is `{"best": float, "state": state_dict}` — atomic, self-describing, read ONLY via `dustq.train.load_best`. Upstream saves a bare state_dict; do not load ours with a plain `torch.load` + `load_state_dict`.
+- The queue CLI is `scripts/run_queue.py` (a literal `scripts/queue.py` shadows the stdlib `queue` module that torch imports).

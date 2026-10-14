@@ -7,8 +7,8 @@ Writes results/benchmark_<device>.md and .json.
 
 import argparse
 import json
+import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -23,6 +23,8 @@ from dustq.recipes import recipe  # noqa: E402
 from dustq.runner import TINY, build_model, tiny_batch  # noqa: E402
 from dustq.upstream import ensure_upstream_on_path  # noqa: E402
 
+SIZE_ALIASES = {"S": "L4d256", "M": "L8d512"}  # v3.1 cell notation -> SIZES keys
+
 ensure_upstream_on_path()
 
 from dust import make_optimizer as dust_make_optimizer  # noqa: E402
@@ -35,7 +37,8 @@ def make_job(size: str, population: int, precision: str, device, scale: str):
     estimator = DUSTQ(model, settings, seed=0)
     if precision != "fp":
         _, bits, scheme = qmodel.parse_precision(precision)
-        qmodel.register_act_hooks(model, bits, scheme)
+        # C5: benchmark timing is scale-scheme-independent, so low-bit absmax is allowed here
+        qmodel.register_act_hooks(model, bits, scheme, allow_lowbit_absmax=True)
     optimizer = dust_make_optimizer(model, settings)
     x, y = tiny_batch(device, seed=7, sequences=8, length=model.config.sequence_len,
                        vocab=model.config.vocab_size)
@@ -56,24 +59,21 @@ def measure(size, population, precision, device, scale, steps):
     return per_step, peak
 
 
-def concurrent_test(device, scale, jobs=2, steps=2):
+def concurrent_test(device, scale, jobs: int = 2, steps: int = 2):
+    """M3: 2-concurrent-S via subprocesses — threads in one process share a single CUDA
+    stream and measure nothing; independent processes interleave kernels on the GPU."""
+    cmd = [sys.executable, __file__, "--worker", "--device", device.type, "--worker-scale", scale,
+           "--worker-size", "L4d256", "--worker-population", "256", "--worker-precision", "fp",
+           "--worker-steps", str(steps)]
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
-    results = [None] * jobs
-    threads = []
     t0 = time.perf_counter()
-    for i in range(jobs):
-        def work(i=i):
-            estimator, optimizer, x, y = make_job("S", 256, "fp", device, scale)
-            for _ in range(steps):
-                estimator.step(x, y, optimizer)
-            estimator.close()
-        th = threading.Thread(target=work)
-        th.start()
-        threads.append(th)
-    for th in threads:
-        th.join()
+    procs = [subprocess.Popen(cmd) for _ in range(jobs)]
+    for p in procs:
+        p.wait()
     wall = time.perf_counter() - t0
+    if any(p.returncode for p in procs):
+        raise RuntimeError(f"a concurrency worker failed (returncodes {[p.returncode for p in procs]})")
     return wall
 
 
@@ -81,21 +81,41 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--scale", default="tiny", choices=["tiny", "real"])
-    parser.add_argument("--sizes", default="S,M")
+    parser.add_argument("--sizes", default="S,M", help="S/M aliases or SIZES keys (L4d256, L8d512)")
     parser.add_argument("--populations", default="256,1024,4096")
-    parser.add_argument("--precisions", default="fp,w1p58a4")
+    parser.add_argument("--precisions", default="fp,w1.58a4")
     parser.add_argument("--steps", type=int, default=3, help="measured steps per cell")
+    parser.add_argument("--skip-concurrent", action="store_true", help="skip the 2-worker test (fast paths)")
+    # worker mode (spawned by concurrent_test; also usable by hand)
+    parser.add_argument("--worker", action="store_true", help="run ONE job and print JSON timing")
+    parser.add_argument("--worker-size", default="L4d256")
+    parser.add_argument("--worker-population", default="256")
+    parser.add_argument("--worker-precision", default="fp")
+    parser.add_argument("--worker-steps", type=int, default=2)
+    parser.add_argument("--worker-scale", default="real")
     args = parser.parse_args()
 
     device = torch.device(args.device if args.device != "auto"
                           else ("cuda" if torch.cuda.is_available() else "cpu"))
+
+    if args.worker:
+        per_step, _ = measure(args.worker_size, int(args.worker_population),
+                              args.worker_precision, device, args.worker_scale,
+                              max(args.worker_steps, 1))
+        print(json.dumps({"s_per_step": round(per_step, 3)}))
+        return
+
     gpu = torch.cuda.get_device_name(0) if device.type == "cuda" else "cpu"
     rows = []
     populations = [int(k) for k in args.populations.split(",")]
     if args.scale == "tiny":
         cells = [("tiny", k, p) for k in populations for p in args.precisions.split(",")]
     else:
-        cells = [(s, k, p) for s in args.sizes.split(",") for k in populations
+        resolved = [SIZE_ALIASES.get(s.strip(), s.strip()) for s in args.sizes.split(",")]
+        for s in resolved:
+            if s not in SIZES:
+                raise SystemExit(f"unknown size {s!r}; use S/M or one of {sorted(SIZES)}")
+        cells = [(s, k, p) for s in resolved for k in populations
                  for p in args.precisions.split(",")]
     for size, population, precision in cells:
         s_per_step, peak = measure(size, population, precision, device, args.scale, args.steps)
@@ -115,7 +135,7 @@ def main():
             rows.append(dict(size="M", K=16384, precision="fp", s_per_step="", peak_gb="",
                              note=f"nrep=16 probe OOM/error: {str(exc)[:200]}"))
 
-    conc = concurrent_test(device, args.scale) if args.scale == "real" else None
+    conc = concurrent_test(device, args.scale) if (args.scale == "real" and not args.skip_concurrent) else None
 
     out = Path("results")
     out.mkdir(exist_ok=True)

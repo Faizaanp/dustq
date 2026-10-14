@@ -38,8 +38,22 @@ def _row_from(cfg: RunConfig, result: dict, status: str, notes: str = "") -> dic
     )
 
 
+FAILED_MARKER = "FAILED_ATTEMPTS"
+MAX_ATTEMPTS = 2
+
+
+def _attempts(run_dir: Path) -> int:
+    path = run_dir / FAILED_MARKER
+    if not path.exists():
+        return 0
+    try:
+        return int(path.read_text().splitlines()[0] or 0)
+    except (ValueError, IndexError):
+        return 0
+
+
 def run_queue(configs_dir, results_dir="results", only: str | None = None,
-              cu_burn_rate: str = "") -> list[str]:
+              cu_burn_rate: str = "", retry_failed: bool = False) -> list[str]:
     configs_dir, results_dir = Path(configs_dir), Path(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
     csv_path = results_dir / "runs.csv"
@@ -53,6 +67,11 @@ def run_queue(configs_dir, results_dir="results", only: str | None = None,
         if (run_dir / "result.json").exists():
             statuses.append(f"skip {cfg.run_id} (complete)")
             continue
+        if retry_failed and (run_dir / FAILED_MARKER).exists():
+            (run_dir / FAILED_MARKER).unlink()  # explicit override; rows are never deleted
+        if _attempts(run_dir) >= MAX_ATTEMPTS:
+            statuses.append(f"skip {cfg.run_id} (failed {MAX_ATTEMPTS}x)")
+            continue
         cfg.output_dir = str(results_dir)  # runs land under the queue's results dir
         try:
             runner = Runner(cfg, device=None)
@@ -63,6 +82,8 @@ def run_queue(configs_dir, results_dir="results", only: str | None = None,
             done.append(cfg.run_id)
         except Exception as exc:  # log the failure, keep the queue moving
             note = f"{type(exc).__name__}: {exc}"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / FAILED_MARKER).write_text(f"{_attempts(run_dir) + 1}\n{note}\n")
             _append_csv_row(csv_path, _row_from(cfg, {}, "failed", notes=note[:500]))
             traceback.print_exc()
             statuses.append(f"FAILED {cfg.run_id}: {note}")

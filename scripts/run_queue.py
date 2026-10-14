@@ -19,9 +19,11 @@ def main():
     parser.add_argument("--results-dir", default="results")
     parser.add_argument("--only", help="run only configs whose run_id contains this substring")
     parser.add_argument("--cu-burn-rate", default="", help="CU/h observed in the Colab Resources tab")
+    parser.add_argument("--retry-failed", action="store_true",
+                        help="reset FAILED_ATTEMPTS markers for matching runs and retry them")
     args = parser.parse_args()
     for line in run_queue(args.configs_dir, args.results_dir, only=args.only,
-                          cu_burn_rate=args.cu_burn_rate):
+                          cu_burn_rate=args.cu_burn_rate, retry_failed=args.retry_failed):
         print(line, flush=True)
 
 

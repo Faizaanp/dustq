@@ -10,6 +10,7 @@ are the activation-quantization pre-hooks attached — giving noise -> quantize.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 
 import torch
 
@@ -47,13 +48,20 @@ def build_model(cfg: dict | None = None, precision: str = "fp", device: str | de
 
 def run_dust(precision: str = "fp", steps: int = 3, population: int = 256, tokens: str = "1M",
              seed: int = 0, device: str | device = "cpu", cfg: dict | None = None,
-             sigmas: dict | None = None) -> list[float]:
+             sigmas: dict | None = None, lr: float | None = None,
+             momentum: float | None = None) -> list[float]:
     model = build_model(cfg, precision, device, seed).requires_grad_(False)
     settings = recipe(tokens, population, model.config.n_layer)
+    if lr is not None or momentum is not None:
+        settings = dataclasses.replace(
+            settings,
+            lr=lr if lr is not None else settings.lr,
+            momentum=momentum if momentum is not None else settings.momentum,
+        )
     estimator = DUSTQ(model, settings, seed=seed, sigmas=sigmas)
     if precision != "fp":
         _, act_bits, act_scheme = qmodel.parse_precision(precision)
-        qmodel.register_act_hooks(model, act_bits, act_scheme)  # AFTER DUSTQ: noise -> quantize
+        qmodel.register_act_hooks(model, act_bits, act_scheme, allow_lowbit_absmax=True)  # AFTER DUSTQ: noise -> quantize
     optimizer = dust_make_optimizer(model, settings)
     x, y = tiny_batch(torch.device(device) if isinstance(device, str) else device)
     losses = []
@@ -71,7 +79,7 @@ def run_backprop(precision: str = "w1.58a4", steps: int = 3, seed: int = 0,
     model = build_model(cfg, precision, device, seed).requires_grad_(True)
     if precision != "fp":
         _, act_bits, act_scheme = qmodel.parse_precision(precision)
-        qmodel.register_act_hooks(model, act_bits, act_scheme)
+        qmodel.register_act_hooks(model, act_bits, act_scheme, allow_lowbit_absmax=True)
     optimizer = make_bp_optimizer(model, lr, momentum)
     x, y = tiny_batch(torch.device(device) if isinstance(device, str) else device)
     losses = []

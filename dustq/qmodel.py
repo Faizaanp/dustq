@@ -28,17 +28,18 @@ _UNSIGNED_SITES = ("mlp.c_proj",)  # post-ReLU^2 input uses the unsigned grid
 
 
 def parse_precision(precision: str) -> tuple[str, int, str]:
-    """'fp' is handled by the caller; 'w8a8' -> ('int8', 8); 'w1.58a4' -> ('ternary', 4)."""
-    key = precision.lower().replace("_", "")
+    """'fp', 'w8a8', 'w1.58a8', 'w1.58a4', 'w1.58a2'; run-id spellings ('w1p58a4') accepted."""
+    aliases = {"w1p58a4": "w1.58a4", "w1p58a8": "w1.58a8", "w1p58a2": "w1.58a2"}
+    key = aliases.get(precision.lower(), precision.lower()).replace("_", "").replace(".", "")
     table = {
         "fp": ("fp", 0, "absmax"),
         "w8a8": ("int8", 8, "absmax"),
-        "w1.58a8": ("ternary", 8, "absmax"),
-        "w1.58a4": ("ternary", 4, "absmax"),
-        "w1.58a2": ("ternary", 2, "absmax"),
+        "w158a8": ("ternary", 8, "absmax"),
+        "w158a4": ("ternary", 4, "absmax"),
+        "w158a2": ("ternary", 2, "absmax"),
     }
     if key not in table:
-        raise ValueError(f"unknown precision {precision!r}; expected one of {sorted(table)}")
+        raise ValueError(f"unknown precision {precision!r}; expected one of {sorted(table)} (dotted or run-id spelling)")
     return table[key]
 
 
@@ -58,12 +59,21 @@ def swap_quantized_linears(model: nn.Module, mode: str) -> nn.Module:
     return model
 
 
-def register_act_hooks(model: nn.Module, bits: int, scheme: str = "absmax") -> list:
+def register_act_hooks(model: nn.Module, bits: int, scheme: str = "absmax",
+                       allow_lowbit_absmax: bool = False) -> list:
     """Attach activation-quantization pre-hooks to the in-scope Linears.
 
     Must be called AFTER DUSTQ/DUST construction on the Dust path (hook order: noise then
     quantize). Returns the hook handles so tests can remove them.
+
+    C5 guard: bits <= 4 with absmax is degenerate (Plan v3.1 4.2) and is refused outside
+    smoke/benchmark mode; real A4/A2 cells wait for T5's MSE-calibrated alpha_b.
     """
+    if scheme == "absmax" and bits <= 4 and not allow_lowbit_absmax:
+        raise ValueError(
+            f"{bits}-bit activations with absmax scales are degenerate (Plan v3.1 4.2); "
+            "smoke/tests pass allow_lowbit_absmax=True; real A4/A2 cells wait for T5 alpha_b"
+        )
     handles = []
     for name, module in model.named_modules():
         site = _site_matches(name, ACT_QUANT_SITES)

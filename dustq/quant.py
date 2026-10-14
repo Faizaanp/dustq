@@ -31,9 +31,15 @@ def ste_act_quantize(x: torch.Tensor, bits: int, unsigned: bool = False,
                      scheme: str = "absmax", alpha: float | None = None) -> torch.Tensor:
     """Per-token activation quantizer over the last (hidden) dimension.
 
+    Quantizer math runs in fp32 (Plan v3.1 4.2) regardless of the input dtype; the output
+    is fp32 (autocast casts per-op on CUDA; DUST captures args[0].float() either way).
+    Residual caveat: under autocast the matmul still casts the dequantized values to bf16,
+    so grid distortion persists until T5's integer-code matmul (spec, C1).
+
     absmax (Phase 0): scale = max|x| / hi. mse_alpha (T5): scale = alpha * mean|x|.
-    Unsigned grid is used for the ReLU^2 output feeding mlp.c_proj (Plan v3.1 section 4.2).
+    Unsigned grid is used for the ReLU^2 output feeding mlp.c_proj (Plan v3.1 4.2).
     """
+    x = x.float()
     if unsigned:
         lo, hi = 0, 2 ** bits - 1
     else:
@@ -57,8 +63,9 @@ class QLinear(nn.Linear):
     optimizer parameter groups see exactly the same module names and parameters as at fp.
     """
 
-    def __init__(self, in_features: int, out_features: int, mode: str = "ternary", bias: bool = False):
-        super().__init__(in_features, out_features, bias=bias)
+    def __init__(self, in_features: int, out_features: int, mode: str = "ternary",
+                 bias: bool = False, device=None, dtype=None):
+        super().__init__(in_features, out_features, bias=bias, device=device, dtype=dtype)
         if mode not in ("ternary", "int8"):
             raise ValueError(f"unknown weight-quant mode {mode!r}")
         self.quant_mode = mode
@@ -81,7 +88,11 @@ class QLinear(nn.Linear):
 
 
 def swap_linear(module: nn.Linear, mode: str) -> QLinear:
-    q = QLinear(module.in_features, module.out_features, mode=mode, bias=module.bias is not None)
+    """Replace a Linear with a QLinear on the same device and dtype (B4: the swap must be
+    transparent to a CUDA-placed model; a CPU-built QLinear would crash every CUDA run)."""
+    q = QLinear(module.in_features, module.out_features, mode=mode,
+                bias=module.bias is not None,
+                device=module.weight.device, dtype=module.weight.dtype)
     q.weight.data.copy_(module.weight.data)
     if module.bias is not None:
         q.bias.data.copy_(module.bias.data)

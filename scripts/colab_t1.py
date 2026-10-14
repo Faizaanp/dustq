@@ -36,7 +36,10 @@ else:
     import zipfile
     with zipfile.ZipFile(REPO_ZIP) as z:
         z.extractall("/content/dustq-repo")
-    root = next(p for p in Path("/content/dustq-repo").iterdir() if (p / "dustq").is_dir())
+    base = Path("/content/dustq-repo")
+    # Handles both a flat git-archive zip (root IS the repo) and a zipped folder.
+    root = next(p for p in [base] + [q for q in base.iterdir() if q.is_dir()]
+                if (p / "dustq").is_dir())
     os.chdir(root)
 print("repo at:", Path.cwd())
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "pyyaml"], check=True)

@@ -92,7 +92,8 @@ def main():
     parser.add_argument("--worker-population", default="256")
     parser.add_argument("--worker-precision", default="fp")
     parser.add_argument("--worker-steps", type=int, default=2)
-    parser.add_argument("--worker-scale", default="real")
+    parser.add_argument("--worker-scale", default="tiny",
+                        help="tiny|real; concurrent_test always passes this explicitly")
     args = parser.parse_args()
 
     device = torch.device(args.device if args.device != "auto"
@@ -118,10 +119,18 @@ def main():
         cells = [(s, k, p) for s in resolved for k in populations
                  for p in args.precisions.split(",")]
     for size, population, precision in cells:
-        s_per_step, peak = measure(size, population, precision, device, args.scale, args.steps)
-        rows.append(dict(size=size, K=population, precision=precision,
-                         s_per_step=round(s_per_step, 3), peak_gb=round(peak, 2) if peak == peak else ""))
-        print(f"{size} K={population} {precision}: {s_per_step:.3f} s/step, peak {peak:.2f} GB", flush=True)
+        try:
+            s_per_step, peak = measure(size, population, precision, device, args.scale, args.steps)
+            rows.append(dict(size=size, K=population, precision=precision,
+                             s_per_step=round(s_per_step, 3),
+                             peak_gb=round(peak, 2) if peak == peak else ""))
+            print(f"{size} K={population} {precision}: {s_per_step:.3f} s/step, peak {peak:.2f} GB", flush=True)
+        except RuntimeError as exc:  # e.g. a CUDA OOM ceiling on one cell: record, continue
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+            rows.append(dict(size=size, K=population, precision=precision, s_per_step="",
+                             peak_gb="", note=f"error: {str(exc)[:120]}"))
+            print(f"{size} K={population} {precision}: FAILED — {str(exc)[:120]}", flush=True)
 
     # nrep=16 memory probe (K=16384) at real scale, best effort.
     mem16 = None
@@ -135,7 +144,14 @@ def main():
             rows.append(dict(size="M", K=16384, precision="fp", s_per_step="", peak_gb="",
                              note=f"nrep=16 probe OOM/error: {str(exc)[:200]}"))
 
-    conc = concurrent_test(device, args.scale) if (args.scale == "real" and not args.skip_concurrent) else None
+    conc = None
+    if args.scale == "real" and not args.skip_concurrent:
+        try:
+            conc = concurrent_test(device, args.scale)
+        except Exception as exc:
+            conc = None
+            rows.append(dict(size="S(2x)", K=256, precision="fp", s_per_step="",
+                             peak_gb="", note=f"concurrent test failed: {str(exc)[:120]}"))
 
     out = Path("results")
     out.mkdir(exist_ok=True)

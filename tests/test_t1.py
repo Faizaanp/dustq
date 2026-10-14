@@ -236,7 +236,8 @@ def test_benchmark_worker_mode():
     # M3: the subprocess worker mode used by the 2-concurrent measurement.
     r = subprocess.run([sys.executable, "scripts/benchmark.py", "--device", "cpu", "--scale", "tiny",
                         "--worker", "--worker-size", "L4d256", "--worker-population", "256",
-                        "--worker-precision", "fp", "--worker-steps", "1"],
+                        "--worker-precision", "fp", "--worker-steps", "1",
+                        "--worker-scale", "tiny"],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stdout[-500:] + r.stderr[-500:]
     assert "s_per_step" in r.stdout

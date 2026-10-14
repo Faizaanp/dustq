@@ -4,9 +4,9 @@ Living document for the owner. Read this before deciding to stop at any point.
 
 **Update rule:** whenever a gate (G0–G4) is decided or a phase completes, update the "Current stage" block in the same commit as the gate recommendation (Plan v3.1 section 8). Venue odds below are judgment calls tagged [design judgment]: this map says what the *evidence* supports, never what will be accepted.
 
-## Current stage (updated 2026-10-11)
+## Current stage (updated 2026-10-14)
 
-**Stage 1 reached — Phase 0 complete** (see `docs/reports/T0.md`): upstream pinned and mapped, hypotheses pre-registered, all CPU acceptance tests green (DUSTQ bitwise-equal to DUST), appendix targets pinned, novelty niche confirmed open as of 2026-10-11 (31 verified references; top overlap risk: FOGZO). Nothing is publishable yet. The first real publishability checkpoint is **Stage 3** (after T6/G2a); the cheapest *meaningful* stop is **Stage 4** (the ~45 L4-h minimum paper, Plan v3.1 section 6.3).
+**Stage 1 — Phase 0 and T1-local complete; T1-Colab pending.** Everything CPU-verifiable is green: DUSTQ bitwise-equal to DUST, exact resume, data prepared and verified, 31-test suite passing (27 passed + 4 CUDA-only, 53:57 CPU), and both external reviews (REVIEW-2026-10-11 + the owner's second review) verified in full and fixed pre-Colab. Nothing is publishable yet. First publishability checkpoint: **Stage 3** (after T6/G2a); cheapest *meaningful* stop: **Stage 4** (~45 L4-h, Plan v3.1 section 6.3).
 
 ## Stage map
 

@@ -48,7 +48,11 @@ class DUSTQ(DUST):
         return {"generator": self.generator.get_state()}
 
     def load_state_dict(self, state):
-        self.generator.set_state(state["generator"])
+        # torch.load(map_location=device) moves the saved state to the GPU, but
+        # set_state requires a CPU ByteTensor (found by the Colab sanity run; invisible
+        # to CPU tests, which round-trip uint8 on CPU).
+        gen_state = state["generator"].to(device="cpu", dtype=torch.uint8)
+        self.generator.set_state(gen_state)
 
     @torch.no_grad()
     def step(self, x, y, optimizer):

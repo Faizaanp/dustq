@@ -19,8 +19,8 @@ Seeded 2026-10-10 during the plan v2 expansion. Updated by any agent who resolve
 
 ## T1 must resolve (benchmarks)
 
-9. [unverified] Single-L4 memory ceiling: does K=4k fit without OOM (upstream used 4 GPUs at K=4k for speed [paper])? Same for the 38M model.
-10. [unverified] Measured L4 CU burn rate; replaces all hour estimates in Plan v2 section 6.
+9. [partially resolved 2026-10-16, Colab] L4 exposes 22.0 GB usable VRAM. Measured peaks: S/K1024 (nrep=8) = 8.12 GB; S/K256 (nrep=2) = 2.91 GB — memory scales with nrep, not K, so K=4096 (nrep=8) should sit near ~8 GB; nrep=16 extrapolates to ~16 GB < 22 GB. The K=16384 probe and an M-model measurement will confirm.
+10. [resolved 2026-10-16, Colab Resources tab] Measured L4 burn rate: **approximately 1.54 CU/h** (Colab Pro, 199.88 CU available at session start) — slightly better than the 1.7 assumption; 200 CU ≈ 130 L4-hours/month.
 
 ## T0 must resolve (novelty)
 

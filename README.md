@@ -14,6 +14,8 @@ Working title: *Backprop-free pretraining of low-bit transformers via activation
 | What is the plan? | `docs/planning/Dust-Q Implementation Plan v3.md` (rev 3.1 — **canonical**, supersedes v1/v2 in the same folder) |
 | If I stop now, is it publishable, and where? | `docs/PUBLICATION_STAGES.md` (updated at every gate) |
 | What is still unverified? | `docs/OPEN_QUESTIONS.md` |
+| What was cut, and how to restore it? | `docs/CUT_CELLS.md` (restore policy + prices + recipes) |
+| The standing research/verification watch | `docs/MONITORING.md` (run before every gate, monthly, pre-submission) |
 | Where do upstream facts live? | `docs/REPO_MAP.md`, `docs/paper_tables.md`, `docs/related_work.md` |
 | What was pre-registered? | `docs/HYPOTHESES.md` |
 | Task reports | `docs/reports/T*.md` |

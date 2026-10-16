@@ -197,23 +197,35 @@ All probes run on our own backprop(-STE) checkpoints at 1M tokens, per precision
 
 ## 6. Experiment matrix and budget
 
-### 6.1 Cost model [design: T1 replaces it]
-FLOPs per full forward over 16k tokens:
-- **M (L8/d512)**: ≈ 0.9 TFLOP matmul + 0.55 TFLOP attention ≈ 1.45 TFLOP.
-- **S (L4/d256)**: ≈ 0.14 + 0.14 ≈ 0.28 TFLOP.
+### 6.1 Cost model — MEASURED 2026-10-16 (re-cut; replaces the pre-T1 estimates)
 
-At about K+16 forwards per step, an assumed ~40 TFLOPS achieved on L4 (M) and ~25 TFLOPS (S, poorer utilization), plus about 30% for fake-quant overhead:
+Measured on the Colab L4 (docs/reports/T1.md): 1 warmup + 3 measured steps per cell;
+**1.52 CU/h** burn; 22.0 GB usable VRAM. The minimal code runs ~2.5–2.8× the pre-T1
+estimates, and the quantized forward costs **2.48–3.18× fp** (not the assumed ~1.3×)
+until T5 caches the quantized codes per optimizer step (§7 T5, now budget-critical).
+
+s/step (peak GB):
 
 | | K=256 | K=1k | K=4k |
 | --- | --- | --- | --- |
-| M s/step | ~13 | ~50 | ~200 |
-| S s/step | ~4 | ~15 | ~60 |
-| M 1M run (61 steps) | 0.2 h | 0.85 h | 3.4 h |
-| S 1M run | 0.07 h | 0.25 h | 1.0 h |
-| S 10M run (610 steps) | 0.7 h | 2.5 h | 10 h (excluded) |
-| M 10M run | 2.2 h | 8.5 h (excluded) | – |
+| S fp | 10.141 (2.91) | 41.962 (8.12) | 165.972 (8.12) |
+| S w1.58a4 | 25.135 | 107.049 | 424.382 |
+| M fp | 31.165 (6.50) | 118.658 (12.08) | ~475 (extrap) |
+| M w1.58a4 | 98.269 | 377.431 | ~1,500 (extrap) |
 
-Backprop runs take minutes. **If T1 measures more than 1.5× these figures, re-cut using section 6.4.**
+Run hours (61 steps @1M, 610 @10M):
+
+| Run | fp | w1.58a4 |
+| --- | --- | --- |
+| S/1M K256 / K1k / K4k | 0.17 / 0.71 / 2.81 | 0.43 / 1.81 / 7.19 |
+| S/10M K256 / K1k | 1.72 / 7.11 | 4.26 / 18.14 |
+| M/1M K256 / K1k / K4k | 0.53 / 2.01 / 8.05 | 1.67 / 6.40 / — |
+| M/10M K256 | 5.28 | 16.65 |
+
+Backprop runs take minutes. Memory scales with nrep, not K: K=4k fits easily (M: 12.08 GB
+at nrep 8); nrep=16 extrapolates to ~17–19 GB and is not in the matrix. After the T5
+caching fix the quantized multipliers should fall to ~1.3× fp; the pending 2-concurrent-S
+measurement (3-min cell) may cut S-cell hours a further ~1.5–1.8×.
 
 ### 6.2 Matrix
 Precisions:
@@ -227,19 +239,19 @@ Precisions:
 
 | Tier | Cells | Dust runs | Est. L4-h | Priority |
 | --- | --- | --- | --- | --- |
-| R | M/1M/P0: BP + Dust K∈{256,1k,4k}. S/10M/P0: BP + Dust K256 (derived recipe vs paper's 5.362) | 12 | ~16 | must |
-| P | probes 1–5 (S all precisions; M at P0/P3) | – | ~6 | must |
-| Tune | section 6.5 | – | ~10 | must |
-| B-S | S/1M, P0–P4 × {BPx, K256, K1k, K4k} | 45 | ~20 | must |
-| B-M | M/1M, P2, P3 × {BPx, K256, K1k} (P0 reused from R) | 12 | ~7 | must |
-| A | S/10M, P0, P3 × {BPx, K256, K1k} (+P2 if budget allows) | 12 (+6) | ~20 (+10) | must |
-| D1 | M/10M, P0, P3 × {BPx, K256} | 6 | ~14 | should (gated on T1) |
+| R | M/1M/P0: BP + Dust K∈{256,1k,4k}. S/10M/P0: BP + Dust K256 (derived recipe vs paper's 5.362) | 12 | **~37** | must |
+| P | probes 1–5 (S all precisions; M at P0/P3) | – | ~10 | must |
+| Tune | section 6.5, trimmed [re-cut]: full 3-point grid only for P3 and P0; 2-point for P1/P2/P4 | – | ~15 | must |
+| B-S | S/1M, P0–P4 × {BPx, K256, K1k}; **K=4k fp only, 1 seed** [re-cut] | 33 | ~32 (~19 after T5) | must |
+| B-M | M/1M, P2, P3 × {BPx, K256, K1k}; **K1k at 1 seed** [re-cut] (P0 reused from R) | 8 | ~23 (~10) | must |
+| A | S/10M, P0, P3 × {BPx, K256, K1k}; **P3 K1k at 1 seed** [re-cut] | 10 | ~57 (~42) | must |
+| D1 | M/10M, P0, P3 × {BPx, K256}; **1 seed** [re-cut] | 2 | ~12–22 | should (gated) |
 | D2 | +2 seeds on the primary cell and its fp counterpart (Dust K1k, BP, BP-STE, BP-SSTE) | 4 | ~2 | **approved** |
 | D3 | BP-LSQ, ZO-W, BP-noise-injection at S/1M/P3 | 3 | ~2 | could |
 | D4 | discrete-update ternary pilot; K=64 | 3–6 | ~4 | could |
 | D5 | continue from our fp checkpoint → P3, Dust K256 vs BP-STE/SSTE | 3 | ~1 | could |
 
-**Core (R + P + Tune + B-S + B-M + A) ≈ 80 L4-h**, about 135 CU at 1.7 CU/h [unverified]. With D1 and D2 it is about 96 L4-h (≈165 CU). That is one 200-CU month if the estimates hold, two months with slack.
+**Core (R + P + Tune + B-S + B-M + A) re-cut 2026-10-16 from the Colab measurements: ~175 L4-h ≈ 266 CU as measured; ~120 L4-h ≈ 183 CU after the T5 caching fix** — the latter fits the current month's remaining quota (~197 CU). Every confirmatory cell is uncut: the primary endpoint and its fp counterpart at 5 seeds, BP-SSTE, the probes, and Tier R. Only descriptive breadth is trimmed, reversibly. **Cut registry and restore policy: `docs/CUT_CELLS.md`** — if more CU/compute arrives or the findings warrant it, restores are a config drop into `configs/` plus a queue re-run, at the prices listed there (cheaper after T5 and if 2-concurrency pays off). The natural restore vehicle is the journal version (T12); restored cells are labeled post-hoc where relevant.
 
 ### 6.3 Minimum publishable paper (if time or compute runs short)
 R (M/1M part) + P + Tune (S only) + B-S, with BP-SSTE included: **≈ 45 L4-h**. That supports H1/H2/H3, the probes and the K axis, which is enough for a TMLR submission scoped as "a 1M-token study". Tier A and B-M then become the revision-stage additions.
@@ -249,7 +261,7 @@ D4 → D3 → D5 → D1 → A's P2 → B-M K1k → P1 (W8A8). **Never cut**: the
 
 ### 6.5 Tuning protocol (validation only; fixed in advance)
 - **Noise scales**: from probe 5 (no training). For A8 and fp, use the upstream σ.
-- **Dust LR**: a 3-point grid {0.6, 1, 1.5}× the upstream default, 1 seed, at K=256 and K=1k per precision, on S/1M. K=4k inherits K=1k's multiplier (upstream LR is nearly flat in K [code]).
+- **Dust LR**: a 3-point grid {0.6, 1, 1.5}× the upstream default, 1 seed, at K=256 and K=1k per precision, on S/1M. K=4k inherits K=1k's multiplier (upstream LR is nearly flat in K [code]). **[Re-cut 2026-10-16]** The full 3-point grid runs only for P3 (primary) and P0; P1/P2/P4 get a 2-point grid {1.0, 1.5}× — a thinner Dust grid is conservative (it can only understate Dust), backprop keeps its denser grid, and the trim is disclosed in the paper's deviations appendix.
 - **M and 10M**: inherit S/1M multipliers on top of the upstream defaults for that budget. Verify with a 2-point check at K=256 only.
 - **Backprop variants**: a 5-point LR grid × 2 momenta per (size, budget, precision). They are cheap.
 - Tuning runs use seeds 100+ and **never count as reported seeds**.
@@ -291,6 +303,7 @@ Each task ends with `docs/reports/T*.md`.
   8. code-matmul QLinear vs an fp64 reference within 1e-3 relative.
 
   Calibrate α_b by MSE on a BP fp checkpoint (S and M) and freeze it in configs. Smoke test: 100 steps per precision per method, with no NaN.
+  **[Re-cut 2026-10-16, budget-critical]** QLinear must cache its quantized codes per optimizer step (weights are frozen within a step; invalidate on any weight mutation) and use the integer-code matmul: the measured per-forward recompute is the single largest recoverable overhead (quantized forwards cost 2.48–3.18× fp, docs/reports/T1.md). Tests 5 and 8 must still pass after the change.
 - **T6 / G2**: probes 1–5. **G2a**: at P3, cos(Dust-1k, ref) rises with K on MLP and writer layers, and directional descent along Dust-1k is negative. **G2b**: the same at P4.
 - **T7**: tuning per section 6.5.
 
@@ -345,7 +358,7 @@ At each gate, write a one-paragraph recommendation for the owner before continui
 - **Derived S recipe or LR transfer underperforms**: mitigated by the G0 S-check and tuning. M remains the anchor.
 - **Minimal-code reproduction gap** vs the paper's optimized code: all comparisons are internal and paired, so a uniform offset does not affect our claims. Report it.
 - **CU rate / session limits**: the idempotent queue plus 10-minute checkpoints make any session productive. The minimum paper (6.3) is about 45 L4-h.
-- **Scooping** (Dust authors, QuZO/FOGZO groups): preprint after G3; a monthly arXiv check for "Dust" + quantization / ternary / non-differentiable.
+- **Scooping** (Dust authors, QuZO/FOGZO groups): preprint after G3; standing watch per `docs/MONITORING.md` — run before every gate, monthly as a floor, and before any submission (covers "Dust" + quantization / ternary / non-differentiable, upstream commits vs our pin, key groups, and optimization leads).
 
 ---
 

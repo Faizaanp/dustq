@@ -4,9 +4,9 @@ Living document for the owner. Read this before deciding to stop at any point.
 
 **Update rule:** whenever a gate (G0–G4) is decided or a phase completes, update the "Current stage" block in the same commit as the gate recommendation (Plan v3.1 section 8). Venue odds below are judgment calls tagged [design judgment]: this map says what the *evidence* supports, never what will be accepted.
 
-## Current stage (updated 2026-10-14)
+## Current stage (updated 2026-10-16)
 
-**Stage 1 — Phase 0 and T1-local complete; T1-Colab pending.** Everything CPU-verifiable is green: DUSTQ bitwise-equal to DUST, exact resume, data prepared and verified, 31-test suite passing (27 passed + 4 CUDA-only, 53:57 CPU), and both external reviews (REVIEW-2026-10-11 + the owner's second review) verified in full and fixed pre-Colab. Nothing is publishable yet. First publishability checkpoint: **Stage 3** (after T6/G2a); cheapest *meaningful* stop: **Stage 4** (~45 L4-h, Plan v3.1 section 6.3).
+**Stage 1 — Phase 0 + T1 complete; §6 re-cut approved; Tier R launch ready.** All CPU-verifiable work is green (31-test suite), the Colab L4 session validated the CUDA path end-to-end (1.52 CU/h measured; resume + quantized GPU steps fixed and green), and the measured budget forced the pre-planned §6.4 re-cut: ~120–175 L4-h core with every confirmatory cell intact, trimmed descriptive cells logged with restore prices in `docs/CUT_CELLS.md` (restores happen when more compute arrives or findings warrant — the journal version is the default vehicle). A standing research/verification watch is active (`docs/MONITORING.md`; first edition 2026-10-16). Nothing is publishable yet; first publishability checkpoint is **Stage 3** (after T6/G2a); the Stage-4 minimum paper costs ~86 L4-h ≈ 131 CU and fits this month's quota.
 
 ## Stage map
 

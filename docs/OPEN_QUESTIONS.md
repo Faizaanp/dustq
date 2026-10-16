@@ -19,8 +19,10 @@ Seeded 2026-10-10 during the plan v2 expansion. Updated by any agent who resolve
 
 ## T1 must resolve (benchmarks)
 
-9. [partially resolved 2026-10-16, Colab] L4 exposes 22.0 GB usable VRAM. Measured peaks: S/K1024 (nrep=8) = 8.12 GB; S/K256 (nrep=2) = 2.91 GB — memory scales with nrep, not K, so K=4096 (nrep=8) should sit near ~8 GB; nrep=16 extrapolates to ~16 GB < 22 GB. The K=16384 probe and an M-model measurement will confirm.
-10. [resolved 2026-10-16, Colab Resources tab] Measured L4 burn rate: **approximately 1.54 CU/h** (Colab Pro, 199.88 CU available at session start) — slightly better than the 1.7 assumption; 200 CU ≈ 130 L4-hours/month.
+9. [resolved 2026-10-16, Colab] K=4096 fits easily: S 8.12 GB, M 12.08 GB (nrep=8) vs 22.0 GB usable. Memory scales with nrep, not K. nrep=16 extrapolates to ~17-19 GB (fits, not in our matrix anyway; probe skipped).
+10. [resolved 2026-10-16, Colab] Measured burn: 2.53 CU over 1.67 h = **1.52 CU/h** end-to-end (Resources tab read ~1.54). 200 CU ≈ 130 L4-hours/month.
+24. [open, next session] The 2-concurrent-S measurement was skipped in the 2026-10-16 session (3-minute cell in the T1 report). S uses ~6-8% of the L4; a ~1.5-1.8x speedup on S cells would roughly halve B-S/Tune/R-S hours. Run before the Tier R launch.
+25. [open, T5 upgrade] QLinear.effective_weight re-quantizes full matrices every chunked forward: measured 2.5x (S) / 3.15x (M) fp overhead. Cache codes per optimizer step (+ integer-code matmul, already planned) before Tier B — this is now budget-critical, not cosmetic.
 
 ## T0 must resolve (novelty)
 

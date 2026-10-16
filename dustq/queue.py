@@ -28,7 +28,8 @@ def _append_csv_row(csv_path: Path, row: dict):
 def _row_from(cfg: RunConfig, result: dict, status: str, notes: str = "") -> dict:
     return dict(
         run_id=cfg.run_id, task=cfg.task, model=cfg.size, params=result.get("params", ""),
-        tokens=cfg.tokens, precision=cfg.precision, method=cfg.method, K=cfg.population,
+        tokens=cfg.tokens, precision=cfg.precision, method=cfg.method,
+        K=cfg.population if cfg.method == "dust" else 0,  # v1 convention: backprop rows are K0
         seed=cfg.seed, lr=cfg.lr, momentum=cfg.momentum,
         noise_scales=json.dumps(cfg.sigmas) if cfg.sigmas else "default",
         val_loss_best=result.get("best_val", ""), test_loss_at_best_val=result.get("test_at_best_val", ""),

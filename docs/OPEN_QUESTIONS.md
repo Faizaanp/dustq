@@ -21,7 +21,7 @@ Seeded 2026-10-10 during the plan v2 expansion. Updated by any agent who resolve
 
 9. [resolved 2026-10-16, Colab] K=4096 fits easily: S 8.12 GB, M 12.08 GB (nrep=8) vs 22.0 GB usable. Memory scales with nrep, not K. nrep=16 extrapolates to ~17-19 GB (fits, not in our matrix anyway; probe skipped).
 10. [resolved 2026-10-16, Colab] Measured burn: 2.53 CU over 1.67 h = **1.52 CU/h** end-to-end (Resources tab read ~1.54). 200 CU ≈ 130 L4-hours/month.
-24. [open, next session] The 2-concurrent-S measurement was skipped in the 2026-10-16 session (3-minute cell in the T1 report). S uses ~6-8% of the L4; a ~1.5-1.8x speedup on S cells would roughly halve B-S/Tune/R-S hours. Run before the Tier R launch.
+24. [resolved 2026-10-16, Colab] 2-concurrent-S measured: 116.1 s vs 40.6 s serial for 2×(2 steps) → **0.35×** (≈2.9× slower, not faster). Root-cause hypothesis [design]: the minimal-code loop is CPU/kernel-launch-bound (consistent with the 2.5–2.8× FLOP-model shortfall), so concurrent processes contend for the VM's few vCPUs while the GPU idles. Sequential queue execution is correct; torch.compile / CUDA-graph leads stay on the MONITORING watch list (item 5).
 25. [open, T5 upgrade] QLinear.effective_weight re-quantizes full matrices every chunked forward: measured 2.5x (S) / 3.15x (M) fp overhead. Cache codes per optimizer step (+ integer-code matmul, already planned) before Tier B — this is now budget-critical, not cosmetic.
 
 ## T0 must resolve (novelty)

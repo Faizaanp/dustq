@@ -224,8 +224,11 @@ Run hours (61 steps @1M, 610 @10M):
 
 Backprop runs take minutes. Memory scales with nrep, not K: K=4k fits easily (M: 12.08 GB
 at nrep 8); nrep=16 extrapolates to ~17–19 GB and is not in the matrix. After the T5
-caching fix the quantized multipliers should fall to ~1.3× fp; the pending 2-concurrent-S
-measurement (3-min cell) may cut S-cell hours a further ~1.5–1.8×.
+caching fix the quantized multipliers should fall to ~1.3× fp. **2-concurrent-S measured
+2026-10-16: NEGATIVE — two concurrent S jobs run ~2.9× slower than serial (116.1 s vs
+40.6 s for the same work, 0.35×)**, i.e. the minimal code is CPU/kernel-launch-bound; run
+the queue sequentially and look to torch.compile/CUDA-graph leads (MONITORING item 5)
+rather than concurrency.
 
 ### 6.2 Matrix
 Precisions:

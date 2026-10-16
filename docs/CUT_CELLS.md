@@ -28,10 +28,11 @@ in the paper. Mechanics: drop the listed YAMLs into `configs/` and re-run
 | 7 | Tier A P2 (S/10M, w1.58a8) | "+P2 if budget allows" | not planned | 6 | 67.2 / 102 | 7 — journal |
 
 Core-restoration total (1–6): **~215 L4-h ≈ 327 CU** ≈ the gap to the uncut matrix
-(~345 → ~175 L4-h as measured). Two multipliers will make restores cheaper than these
-prices: the T5 code-caching fix (quantized cells ≈ 1.3× fp instead of 2.5–3.2×) and the
-pending 2-concurrent-S measurement (S cells possibly ~1.5–1.8× cheaper). The pending
-concurrent result may also fund priorities 1–3 inside the current month's quota.
+(~345 → ~175 L4-h as measured). The T5 code-caching fix will make quantized restores
+cheaper (~1.3× fp instead of 2.5–3.2×). **Concurrency does not pay: measured 2026-10-16,
+two concurrent S jobs ran ~2.9× slower than serial (116.1 s vs 40.6 s; 0.35×)** — the
+minimal-code workload is CPU/kernel-launch-bound — so the prices above stand at sequential
+rates, and buy-backs ride on T5 caching plus any additional compute that arrives.
 
 ## How to restore (example)
 

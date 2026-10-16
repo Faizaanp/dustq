@@ -19,6 +19,9 @@ had cited Dust as of 2026-10-11. The watch turns that one-time scan into a stand
    against our pin (`third_party/dust/UPSTREAM_COMMIT`, currently `b20f7c03eac...`). New
    commits matter doubly if they touch quantization, dtype, recipes, or bug fixes we
    reproduced around. Summarize any diff vs our pin.
+   **1b. Noise benchmark (Q Labs, github.com/qlabs-eng/noise)** — new PRs and records; its
+   rules allow quantized forwards, so any third-party quantized-forward entry is an ACT
+   trigger (none as of 2026-10-17; records are estimator/optimizer tweaks).
 2. **Citations of Dust** — search Semantic Scholar / Google Scholar / arXiv full-text for
    the report (qlabs.sh/research/dust) and its authors. Any citing paper is read at
    abstract level minimum; overlap with our niche (activation-space perturbation + low-bit

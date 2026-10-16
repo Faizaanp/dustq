@@ -313,7 +313,7 @@ Our project sits at the intersection of two threads that have so far met only in
 ## 10. Claim discipline
 
 **We MAY claim (with "to our knowledge" hedges and after the overlap checks below):**
-- To our knowledge, the first zeroth-order method that trains quantized transformers (low-bit weights **and** activations) **from scratch**, and the first to combine activation-space ZO credit assignment with a quantized forward pass in any setting.
+- To our knowledge, the first zeroth-order method that trains quantized **transformers** (low-bit weights **and** activations) **from scratch** using **activation-space (node) perturbation**, and the first systematic comparison of a pure (backprop-free) activation-perturbation ZO estimator vs. STE vs. a Gaussian-smoothed STE control, at matched budgets, for that setting. *[Watch 2026-10-16 scoping: EGGROLL (arXiv:2511.16652, Â§6.1 + App. G/H) already pretrained an int8-weight, integer-activation RNN LM from scratch under **weight-space** ES â€” 3.40 vs 3.58 bits/byte at ~180Ã— the GPU-hours, no STE/QAT baseline; Poor Man's Training (arXiv:2411.05873) already combines quantized ZO with **node perturbation** for MCU adaptation. Neither is a transformer at pretraining scale with activation-space credit, and neither runs the matched ZO-vs-STE comparison â€” the words "in any setting" and "any architecture" are retired.]*
 - The first systematic comparison of a pure (backprop-free) activation-perturbation ZO estimator vs. STE vs. a Gaussian-smoothed STE control, at matched budgets, for from-scratch quantized LM pretraining.
 - Our empirical findings at the scales we actually run (7M/38M params; 1M/10M tokens; int8/ternary weights, low-bit activations), including any analysis of how a quantized forward changes the noise-reward interaction in the Dust estimator.
 
@@ -328,6 +328,8 @@ Our project sits at the intersection of two threads that have so far met only in
 - Any general superiority of "ZO over STE": FOGZO shows STE+ZO hybrids can beat pure STE in QAT pretraining; our Gaussian-smoothed STE control exists precisely to separate "zeroth-order-ness" from "smoothing" effects, so attribute effects carefully and only at our scales.
 - Any efficiency or frontier-scaling claims: Dust itself disclaims compute efficiency; our small-scale results license none.
 - Do not describe ZeroQAT's "quantized pre-training" as from-scratch â€” those experiments continue training *pretrained* Llama/OPT models under quantization; misdescribing it invites correction.
+- Do not claim backprop-free **quantized from-scratch pretraining in any architecture** â€” EGGROLL's EGG experiment took that cell (int8 RNN, weight-space ES; see Â§12 / WATCH 2026-10-16).
+- Do not claim quantized ZO **with node/activation perturbation in any setting** â€” Poor Man's Training (arXiv:2411.05873, the QuZO group) combines exactly that for MCU adaptation (see Â§12).
 
 ---
 
@@ -345,3 +347,29 @@ Our project sits at the intersection of two threads that have so far met only in
 10. **Hessian-ZO line** (HiZOO â†’ HQZO) â€” already reached quantized fine-tuning in a Springer LNCS venue; a pretraining extension is plausible.
 
 **Standing verification notes:** HQZO verified via Crossref (Springer page unrenderable for our fetcher) â€” abstract read only in part; Zoop verified via Dust's bibliography only (OpenReview bot-blocked); EGGROLL's integer-datatype experiment verified at abstract level only. All other references above were verified by reading their abstract page or full text on 2026-10-11.
+
+## 12. Watch update 2026-10-16 (amendments from docs/reports/WATCH/2026-10-16.md)
+
+New and newly-resolved references; full citations and fetch details in the WATCH report.
+
+**Resolves standing overlap items:**
+- **EGGROLL integer experiment (arXiv:2511.16652)** — RESOLVED from full text: from-scratch character-level pretraining of EGG (a minGRU RNN, no activation functions) with **int8 weights and integer activations**, under **weight-space** ES at populations up to 2^20; 3.40 vs 3.58 bits/byte vs a backprop transformer at ~180x GPU-hours; no STE/QAT baseline. Our differentiators: transformers, activation-space (virtual-population) credit, matched ZO-vs-STE-vs-SSTE comparison, modest-population regimes.
+- **AGZO (arXiv:2601.17261, ICML 2026; Lin et al.)** and **ZO-Act (arXiv:2607.01125; Dong et al.)** — both activation-*informed* weight-subspace ZO fine-tuning (they perturb weights in subspaces informed by activations, never activations themselves); no quantization overlap; disambiguate the names when citing; AIM-ZO (arXiv:2609.35257) is the third family member.
+
+**New to us (missed by the 2026-10-11 scan or posted since):**
+- **Poor Man's Training on MCUs (arXiv:2411.05873; Zhao, Li, Young, Zhang — QuZO group)** — quantized ZO + **node perturbation** + sparse training for MCU adaptation of an image classifier; kills the "in any setting" phrase (section 10 updated).
+- **QES (arXiv:2602.03120; Xu, Schweighofer, Miikkulainen, Qiu)** — full-parameter ES fine-tuning directly in the quantized space of PTQ LLMs; the ES-at-Scale group has entered quantization (fine-tuning quadrant).
+- **TerMeZO (arXiv:2609.33548; Sifaou et al.)** — sparse ZO fine-tuning of BitNet models (ternary weights, 8-bit activations); ZO x BitNet now exists, fine-tuning only.
+- **CEWT (arXiv:2609.32659; Yang & Aamodt — FOGZO authors)** — backprop QAPT with post-update weight-histogram projection, down to 1-bit, up to 610M params; the FOGZO group is now the most active on quantized from-scratch pretraining, all with backprop+STE except FOGZO itself. Monthly author-level watch.
+- **BBQ (arXiv:2603.01599, ICLR 2026; Yang & Aamodt)** — entropy-optimal compute-efficient quantization for backprop QAPT, 1-4 bits.
+- **GRZO (arXiv:2606.02857, Findings of EMNLP 2026; Tan et al. — QuZO group)** — group-relative ZO normalization lifting sparse/low-rank/quantized ZO fine-tuning.
+- **AIM-ZO (arXiv:2609.35257; Xie et al.)** — third activation-informed-subspace ZO fine-tuning entry.
+- **QScheduler (arXiv:2607.18802; Do Amaral et al.)** — adaptive ZO query budgets; first INT8 on-device-training PoC on the STM32N6 NPU (vision).
+- **ZOA (arXiv:2508.02180; Deng et al.)** and **FOZO (arXiv:2603.04733, CVPR 2026; Wang & Wang)** — ZO test-time adaptation of quantized models (vision); TTA quadrant.
+- **Continual QAPT (arXiv:2502.11895; Nielsen et al.)** — 16-to-1.58-bit backprop+STE pretraining transition; background for our STE baselines.
+- **Lost in the bf16 Cast (arXiv:2610.07853; Sahai et al.)** — bf16-casting ternary latent weights before export flips 0.83-1.77% of shipped codes and can collapse accuracy; engineering caution for our QLinear: latent fp32 stays pinned, and T5 gains a dtype-pinning test.
+- **Noise benchmark (github.com/qlabs-eng/noise; Q Labs, Oct 2026)** — community speedrun for backprop-free pretraining on Dust's exact 37.7M model and our exact 10M FineWeb split; rules allow a quantized forward (none submitted yet); standing tripwire in docs/MONITORING.md.
+
+Positioning paragraph (section 9) and claim discipline (section 10) are amended as above;
+the two-axis landscape is unchanged: nothing found occupies (activation-space perturbation
+x low-bit quantized forward x from-scratch transformer pretraining x matched ZO-vs-STE).

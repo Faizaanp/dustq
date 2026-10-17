@@ -245,3 +245,22 @@ def test_benchmark_worker_mode():
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stdout[-500:] + r.stderr[-500:]
     assert "s_per_step" in r.stdout
+
+def test_microbatch_gradient_equivalence():
+    # The OOM fallback splits the batch into accumulation chunks; one accumulated step
+    # must match the full-batch step (params after one step, momentum 0). Verified on the
+    # QUANTIZED path: per-token activation scales are chunk-invariant by construction.
+    from dustq import qmodel, runner
+    from dustq.backprop_ext import _bp_step, make_bp_optimizer
+    m1 = runner.build_model(precision="w1.58a4", seed=0).requires_grad_(True)
+    m2 = runner.build_model(precision="w1.58a4", seed=0).requires_grad_(True)
+    for m in (m1, m2):
+        qmodel.register_act_hooks(m, 4, "absmax", allow_lowbit_absmax=True)
+    x, y = runner.tiny_batch(torch.device("cpu"), seed=11)
+    o1 = make_bp_optimizer(m1, 1e-3, 0.0)
+    o2 = make_bp_optimizer(m2, 1e-3, 0.0)
+    l1 = _bp_step(m1, o1, x, y, 1)
+    l2 = _bp_step(m2, o2, x, y, 2)
+    assert math.isclose(l1, l2, rel_tol=1e-6, abs_tol=1e-6)
+    for (_, p1), (_, p2) in zip(m1.named_parameters(), m2.named_parameters()):
+        assert torch.allclose(p1, p2, rtol=1e-4, atol=1e-6), "micro-batched step diverged"

@@ -92,6 +92,10 @@ def test_resume_exactness_dust(tmp_path):
     assert_close(result_a["best_val"], result_c["best_val"], dev)
     assert_close(result_a["test_at_best_val"], result_c["test_at_best_val"], dev)
     assert_same_state(run_a.model, run_c.model)
+    # wall_s must accumulate across resume segments, not report the last segment only
+    seg_elapsed = result_c["history"][-1]["elapsed_seconds"]
+    assert result_c["wall_s"] > 1.2 * seg_elapsed, (
+        f"wall_s {result_c['wall_s']:.1f}s looks like a single segment (last {seg_elapsed:.1f}s)")
     # M2: no duplicate step rows in metrics.jsonl after the resume
     steps_seen = [json.loads(line)["step"] for line in
                   (tmp_path / "b" / cfg_c.run_id / "metrics.jsonl").read_text().splitlines()

@@ -79,6 +79,8 @@ class Runner:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.ckpt_path = self.run_dir / "ckpt.pt"
         self.model = self.estimator = self.optimizer = None
+        self._wall_prior = 0.0   # cumulative wall of all PREVIOUS segments (resume)
+        self._t_seg = None       # this segment's start; wall_s = _wall_prior + segment elapsed
 
     # ---------- setup ----------
 
@@ -143,6 +145,7 @@ class Runner:
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "step": step, "best": best, "history": history,
+            "wall_prior": self._wall_prior + (time.monotonic() - self._t_seg),
         }
         if self.estimator is not None:
             payload["generator"] = self.estimator.state_dict()
@@ -156,7 +159,7 @@ class Runner:
         self.optimizer.load_state_dict(payload["optimizer"])
         if self.estimator is not None and "generator" in payload:
             self.estimator.load_state_dict(payload["generator"])
-        return payload["step"], payload["best"], payload["history"]
+        return payload["step"], payload["best"], payload["history"], payload.get("wall_prior", 0.0)
 
     # ---------- training ----------
 
@@ -165,10 +168,11 @@ class Runner:
         self._build()
         self._load_data()
         history_path = self.run_dir / "metrics.jsonl"
+        self._t_seg = time.monotonic()
         start, best, history = 0, None, []
 
         if self.ckpt_path.exists():
-            start, best, history = self._load_ckpt()
+            start, best, history, self._wall_prior = self._load_ckpt()
             best_path = self.run_dir / "best.pt"
             if best_path.exists():
                 try:  # C3: the file's best is authoritative after a crash
@@ -191,7 +195,7 @@ class Runner:
             self._save_best(best)
             history = [dict(step=0, val_loss=best)]
 
-        t_start, t_ckpt = time.monotonic(), time.monotonic()
+        t_start, t_ckpt = self._t_seg, time.monotonic()
         for step in range(start + 1, cfg.steps + 1):
             x, y = self._batch(step)
             if cfg.method == "dust":
@@ -234,7 +238,8 @@ class Runner:
             best_val=file_best,
             test_at_best_val=evaluate(model, self.test_rows, self.device, self.cfg.dtype),
             history=history, steps=self.cfg.steps,
-            wall_s=history[-1].get("elapsed_seconds", 0.0) if history else 0.0,
+            # cumulative wall across ALL segments (resume-safe; records the true total)
+            wall_s=self._wall_prior + (time.monotonic() - self._t_seg),
             params=sum(p.numel() for p in model.parameters()),
             gpu=torch.cuda.get_device_name(0) if self.device.type == "cuda" else "cpu",
             dtype="fp32" if (self.cfg.dtype == "fp32" or self.device.type == "cpu") else "bf16",

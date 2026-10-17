@@ -233,16 +233,4 @@ Detailed documentation and research logs are tracked in `docs/`:
 
 ---
 
-## License & Attribution
 
-This project is licensed under the [MIT License](LICENSE).
-
-Upstream Dust algorithm and implementation:
-```bibtex
-@misc{qlabs2025dust,
-  title={DUST: Activation-Space Zeroth-Order Optimization for Transformers},
-  author={Q Labs},
-  year={2025},
-  url={https://github.com/qlabs-eng/dust}
-}
-```

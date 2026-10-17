@@ -79,6 +79,9 @@ def run_queue(configs_dir, results_dir="results", only: str | None = None,
             result_path = runner.train()
             result = json.loads(result_path.read_text())
             _append_csv_row(csv_path, _row_from(cfg, result, "completed"))
+            marker = run_dir / FAILED_MARKER
+            if marker.exists():  # a success clears the failure history for this run
+                marker.unlink()
             statuses.append(f"done {cfg.run_id}")
             done.append(cfg.run_id)
         except Exception as exc:  # log the failure, keep the queue moving

@@ -92,10 +92,11 @@ def test_resume_exactness_dust(tmp_path):
     assert_close(result_a["best_val"], result_c["best_val"], dev)
     assert_close(result_a["test_at_best_val"], result_c["test_at_best_val"], dev)
     assert_same_state(run_a.model, run_c.model)
-    # wall_s must accumulate across resume segments, not report the last segment only
-    seg_elapsed = result_c["history"][-1]["elapsed_seconds"]
-    assert result_c["wall_s"] > 1.2 * seg_elapsed, (
-        f"wall_s {result_c['wall_s']:.1f}s looks like a single segment (last {seg_elapsed:.1f}s)")
+    # wall_s accumulates across resume segments; per-record elapsed is cumulative/monotone
+    assert result_c["wall_s"] >= result_c["history"][-1]["elapsed_seconds"] - 1e-6
+    assert abs(result_c["wall_s"] - result_a["wall_s"]) < 0.35 * result_a["wall_s"], (
+        f"resumed wall {result_c['wall_s']:.0f}s vs uninterrupted {result_a['wall_s']:.0f}s — "
+        "resume is losing time again")
     # M2: no duplicate step rows in metrics.jsonl after the resume
     steps_seen = [json.loads(line)["step"] for line in
                   (tmp_path / "b" / cfg_c.run_id / "metrics.jsonl").read_text().splitlines()
@@ -264,3 +265,24 @@ def test_microbatch_gradient_equivalence():
     assert math.isclose(l1, l2, rel_tol=1e-6, abs_tol=1e-6)
     for (_, p1), (_, p2) in zip(m1.named_parameters(), m2.named_parameters()):
         assert torch.allclose(p1, p2, rtol=1e-4, atol=1e-6), "micro-batched step diverged"
+
+def test_oom_chunk_caching(monkeypatch):
+    # After the first OOM, later steps must start at the cached chunk count instead of
+    # re-paying a wasted full-batch OOM every step (matters at 610-step budgets).
+    import types
+    from dustq import backprop_ext
+    calls = []
+
+    def fake(model, optimizer, x, y, n):
+        calls.append(n)
+        if n == 1:
+            raise torch.cuda.OutOfMemoryError("simulated OOM")
+        return 1.0
+
+    monkeypatch.setattr(backprop_ext, "_bp_step", fake)
+    model = types.SimpleNamespace()
+    x = types.SimpleNamespace(is_cuda=True)
+    assert backprop_ext.train_step(model, None, x, None) == 1.0
+    assert calls == [1, 2] and model._bp_microbatches == 2
+    assert backprop_ext.train_step(model, None, x, None) == 1.0
+    assert calls == [1, 2, 2], "second step must start at the cached chunk count"

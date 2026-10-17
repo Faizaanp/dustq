@@ -202,7 +202,10 @@ class Runner:
                 loss = self.estimator.step(x, y, self.optimizer)
             else:
                 loss = train_step(self.model, self.optimizer, x, y)
-            record = dict(step=step, train_loss=loss, elapsed_seconds=time.monotonic() - t_start)
+            # cumulative wall clock across resume segments (monotone; per-segment
+            # elapsed restarted at 0 before the 2026-10-17 fix and broke time plots)
+            record = dict(step=step, train_loss=loss,
+                          elapsed_seconds=self._wall_prior + (time.monotonic() - t_start))
             if step == 1 or step % cfg.eval_interval == 0 or step == cfg.steps:
                 value = evaluate(self.model, self.val_rows, self.device, cfg.dtype)
                 record["val_loss"] = value

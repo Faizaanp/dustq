@@ -55,12 +55,21 @@ def _bp_step(model, optimizer, x, y, microbatches: int) -> float:
 
 def train_step(model, optimizer, x, y) -> float:
     """One backprop step; returns the batch loss (baselines/backprop.py train_step),
-    with automatic micro-batching fallback on CUDA OOM (equivalent gradients)."""
+    with automatic micro-batching on CUDA OOM. The chunk count that worked is cached on
+    the model (`model._bp_microbatches`), so later steps start at the cached size instead
+    of re-paying a wasted full-batch OOM every step (found in review: each retry burned a
+    ~20 GB partial graph; that matters at 610-step budgets)."""
     if not x.is_cuda:
         return _bp_step(model, optimizer, x, y, 1)
-    for n in (1, 2):
+    n = getattr(model, "_bp_microbatches", 1)
+    while True:
         try:
-            return _bp_step(model, optimizer, x, y, n)
+            loss = _bp_step(model, optimizer, x, y, n)
+            if n > 1:
+                model._bp_microbatches = n
+            return loss
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
-    return _bp_step(model, optimizer, x, y, 4)
+            if n >= 8:
+                raise
+            n *= 2

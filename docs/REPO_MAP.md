@@ -50,13 +50,7 @@ lives in `dustq/`.
 - Full forwards per step ≈ K (direct draws) + 16 (scalars); head and local draws are cheap.
 - Attention (`model.py:9`) is SDPA over a dense boolean mask — full T×T even for half-window
   blocks. Window pattern 'SSSL' (`model.py:27`): in L8, blocks 3 and 7 are full-window.
-- **Memory consequence (found in Tier R, 2026-10-17):** the explicit mask blocks SDPA's
-  fused backends, so *backprop* on the 37.7M model materializes math-backend
-  (B,H,2048,2048) score tensors plus gradients (~20+ GB) and OOMs on a 22 GB L4. Upstream
-  never saw this (larger GPUs). Our fix: `dustq/backprop_ext.py::train_step` falls back
-  to token-weighted micro-batch gradient accumulation (2, then 4 chunks — numerically
-  equivalent, equivalence-tested on the quantized path). DUST runs are forward-only and
-  unaffected (measured peaks 6.5–12.1 GB).
+- **Memory note (corrected 2026-10-18):** the Tier-R M-backprop OOMs were OUR bug, not upstream's — `dustq/train.py::evaluate` ran with gradients enabled, so the step-0 evaluation of a requires_grad model built ~21 GB of graph on 32-sequence eval batches before training began (upstream's evaluate is no_grad; ours now is too, c610ae3). Whether the 8-sequence training BACKWARD on the 37.7M model fits in 22 GB (the dense-mask SDPA may force math-backend score materialization) is UNVERIFIED; `backprop_ext.train_step` micro-batches on OOM as the standing mitigation. DUST runs are forward-only and unaffected (peaks 6.5–12.1 GB measured).
 
 ## Optimizers (asymmetric — preserve per-method)
 

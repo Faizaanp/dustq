@@ -90,6 +90,11 @@ def run_queue(configs_dir, results_dir="results", only: str | None = None,
             note = f"{type(exc).__name__}: {exc}"
             run_dir.mkdir(parents=True, exist_ok=True)
             (run_dir / FAILED_MARKER).write_text(f"{_attempts(run_dir) + 1}\n{note}\n")
+            # Full stack for the next debugging session; keep the tail (the failing frames
+            # are at the end). The 500-char CSV note truncated exactly the frames that
+            # identified the eval-grads OOM and cost a day of wrong root-causing.
+            (run_dir / "FAILED_TRACEBACK.txt").write_text(
+                "".join(traceback.format_exception(exc))[-20000:])
             _append_csv_row(csv_path, _row_from(cfg, {}, "failed", notes=note[:500]))
             traceback.print_exc()
             statuses.append(f"FAILED {cfg.run_id}: {note}")

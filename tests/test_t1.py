@@ -224,6 +224,10 @@ def test_queue_failure_marker(tmp_path):
     lines = (tmp_path / "results" / "runs.csv").read_text().splitlines()
     assert len(lines) == 4  # header + 3 failed rows (the skip adds none)
     assert sum(1 for line in lines if ",failed," in line) == 3
+    # the full stack is saved for debugging (the truncated CSV note cost a day once)
+    run_dir = tmp_path / "results" / cfg.run_id
+    assert (run_dir / "FAILED_TRACEBACK.txt").exists()
+    assert "FileNotFoundError" in (run_dir / "FAILED_TRACEBACK.txt").read_text()
 
 
 def test_benchmark_end_to_end_tiny():

@@ -5,12 +5,12 @@ its *own* optimizer grouping — wte at lr 1000, everything else at the base lr,
 special lr for value_embeds or the lambda scalars (unlike DUST.make_optimizer). Any change
 to grouping must be symmetric across methods and recorded in the paper.
 
-The 37.7M model's backprop graph at 16k tokens exceeds an L4's 22 GB: upstream's
-attention passes an explicit dense mask to SDPA, which blocks the fused backends and
-forces math-backend score materialization ((B,H,2048,2048) per layer plus gradients).
-train_step therefore retries on CUDA OOM with 2, then 4, gradient-accumulation chunks —
-numerically equivalent to the full-batch step (grads scaled by exact token counts).
-Upstream never hit this because it ran on larger GPUs (REPO_MAP, memory note).
+The 37.7M model's 8-sequence training backward MAY approach the L4's 22 GB (upstream's
+dense-mask SDPA can force math-backend score materialization — a hypothesis that remains
+unverified; the Tier-R OOMs turned out to be a grad-enabled evaluation in our own code,
+fixed at c610ae3). train_step therefore retries on CUDA OOM with 2, then 4,
+gradient-accumulation chunks — numerically equivalent to the full-batch step (grads
+scaled by exact token counts) — and caches the working chunk count on the model.
 """
 
 from __future__ import annotations

@@ -88,7 +88,6 @@ dust-q/
 │   ├── planning/           # Dust-Q Implementation Plan v3.1 (canonical)
 │   ├── HYPOTHESES.md       # Pre-registered hypotheses and evaluation endpoints
 │   ├── REPO_MAP.md         # Upstream architectural mapping and design notes
-│   ├── PUBLICATION_STAGES.md # Gate criteria, paper structure, and venue roadmap
 │   └── reports/            # Milestone verification reports (T0, T1, review fixes)
 └── third_party/dust/       # Pinned upstream Q Labs Dust repository
 ```
@@ -223,7 +222,6 @@ Detailed documentation and research logs are tracked in `docs/`:
 
 - [**Implementation Plan v3.1**](docs/planning/Dust-Q%20Implementation%20Plan%20v3.md): The canonical design plan, cost model, and gate definitions.
 - [**Pre-registered Hypotheses**](docs/HYPOTHESES.md): Primary and secondary endpoints, paired-seed bootstrap methodology, and early exit criteria.
-- [**Publication Stages & Venues**](docs/PUBLICATION_STAGES.md): Submission criteria, fallback paths (TMLR $\to$ Neural Networks $\to$ Neurocomputing), and target narrative.
 - [**Upstream Repository Map**](docs/REPO_MAP.md): Detailed line-by-line mapping against upstream Q Labs `dust.py`.
 - [**Open Questions & Tracking**](docs/OPEN_QUESTIONS.md): Active tracking of experimental and theoretical questions.
 

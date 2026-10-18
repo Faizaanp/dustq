@@ -5,15 +5,22 @@ measurements, docs/reports/T1.md) trimmed **descriptive cells only** — every c
 cell (the primary endpoint and its fp counterpart at 5 seeds, BP-SSTE, the probes, and
 Tier R/G0) is uncut, and `docs/HYPOTHESES.md` is frozen: restores never touch it.
 
-## Restore policy (the owner's decision, recorded 2026-10-16)
+## Restore policy (the owner's decision, recorded 2026-10-16; updated 2026-10-18)
 
 **We will go back and restore these cells if** (a) more compute arrives (more/larger CU
 allowance, better GPU time, or freed schedule), or (b) the findings are good enough to
 warrant the breadth (e.g., G2a/G3 pass with a clear result, or reviewers ask for it).
-The default vehicle is the journal extension (Plan v3.1 T12); earlier restores are fine
-once the Stage-4 core is secured. Restored cells are labeled post-hoc where they appear
-in the paper. Mechanics: drop the listed YAMLs into `configs/` and re-run
-`scripts/run_queue.py` — the queue skips completed runs and only trains what is new.
+
+**Update 2026-10-18: trigger (a) has fired** — the owner confirmed **300–400 CU/month**
+(~195–260 L4-h at the measured 1.52–1.54 CU/h), removing the CU constraint entirely. The
+binding constraints are now session wall-clock (one L4, sequential queue; concurrency
+measured negative at 0.35×) and the scooping clock — so the *execution order* is
+unchanged (preprint after G3, then expand), but **restore priorities 1–3 (~68 L4-h ≈
+104 CU) are promoted into the pre-submission plan** (they complete Figure 5's fp
+K-ladder and the 10M quantized cell — they strengthen the TMLR submission itself).
+Priorities 4–7 (~197 L4-h ≈ 300 CU — previously "someday") now fit comfortably inside a
+single later month and stay assigned to the journal version (T12). The default vehicle
+and all discipline rules below are unchanged.
 
 ## Registry (prices at 2026-10-16 measured rates, ×1.52 CU/L4-h)
 

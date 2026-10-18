@@ -1,10 +1,6 @@
 # Dust-Q: Backprop-Free Pretraining of Low-Bit Transformers
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
-[![Tests](https://img.shields.io/badge/tests-27%20passed%20%7C%204%20CUDA--skipped-brightgreen.svg)](tests/)
-[![Target: TMLR](https://img.shields.io/badge/target%20venue-TMLR-purple.svg)](docs/PUBLICATION_STAGES.md)
+
 
 **Dust-Q** is an empirical and theoretical investigation into training quantized autoregressive Transformers from scratch **without backpropagation**. It explores whether **Dust**—an activation-space zeroth-order perturbation method introduced by Q Labs—can overcome the notorious gradient-bias problems of the Straight-Through Estimator (STE) when pretraining models with ternary weights (BitNet $b1.58$) and low-bit activations ($A8$, $A4$, $A2$).
 

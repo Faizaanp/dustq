@@ -23,7 +23,11 @@ from pathlib import Path
 REPO_ZIP = "/content/dustq.zip"
 DRIVE_DATA = "/content/drive/MyDrive/dustq/data"
 DRIVE_RESULTS = "/content/drive/MyDrive/dustq/results"
-CU_BURN_RATE = "1.52"  # measured 2026-10-16; update from the Resources tab if it differs
+CU_BURN_RATE = "1.54"  # measured 2026-10-16/17 from the Resources tab
+# The 3 M-backprop rows hit FAILED_ATTEMPTS=2 while the zombie-OOM bug was live; with
+# retry enabled they re-run (and succeed) under the fixed code. Flip to False once the
+# L8d512_1M_fp_backprop rows show "done"/"skip (complete)" in runs.csv.
+RETRY_FAILED = True
 
 # ---- 0. environment ----
 import torch
@@ -71,6 +75,8 @@ print("^ PASTE THIS LINE BACK (buy-back decision, docs/CUT_CELLS.md)")
 # ---- 5. Tier R queue (idempotent; resumable; results on Drive) ----
 cmd = [sys.executable, "scripts/run_queue.py", "--configs-dir", "configs",
        "--results-dir", DRIVE_RESULTS, "--cu-burn-rate", CU_BURN_RATE]
+if RETRY_FAILED:
+    cmd.append("--retry-failed")
 print(" ".join(cmd), flush=True)
 subprocess.run(cmd, check=True)
 print("\nTier R queue finished for this session. Re-run this cell any time; it resumes.")

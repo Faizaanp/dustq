@@ -8,6 +8,7 @@ start fresh otherwise. Every completed or failed run is appended to results/runs
 from __future__ import annotations
 
 import csv
+import gc
 import json
 import traceback
 from pathlib import Path
@@ -74,6 +75,7 @@ def run_queue(configs_dir, results_dir="results", only: str | None = None,
             statuses.append(f"skip {cfg.run_id} (failed {MAX_ATTEMPTS}x)")
             continue
         cfg.output_dir = str(results_dir)  # runs land under the queue's results dir
+        failed = False
         try:
             runner = Runner(cfg, device=None)
             result_path = runner.train()
@@ -91,4 +93,10 @@ def run_queue(configs_dir, results_dir="results", only: str | None = None,
             _append_csv_row(csv_path, _row_from(cfg, {}, "failed", notes=note[:500]))
             traceback.print_exc()
             statuses.append(f"FAILED {cfg.run_id}: {note}")
+            failed = True
+        if failed:
+            # Outside the except block (exception released): a failed run's model/optimizer
+            # and any zombie autograd graphs are reference cycles — force collection so the
+            # next config starts from clean memory.
+            gc.collect()
     return statuses

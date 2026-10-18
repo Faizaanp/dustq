@@ -15,6 +15,8 @@ Upstream never hit this because it ran on larger GPUs (REPO_MAP, memory note).
 
 from __future__ import annotations
 
+import gc
+
 import torch
 
 
@@ -63,13 +65,21 @@ def train_step(model, optimizer, x, y) -> float:
         return _bp_step(model, optimizer, x, y, 1)
     n = getattr(model, "_bp_microbatches", 1)
     while True:
+        oom = False
         try:
             loss = _bp_step(model, optimizer, x, y, n)
             if n > 1:
                 model._bp_microbatches = n
             return loss
         except torch.cuda.OutOfMemoryError:
-            torch.cuda.empty_cache()
             if n >= 8:
                 raise
+            oom = True
             n *= 2
+        # Reached only after a recoverable OOM, with the exception already released. The
+        # failed attempt's partial autograd graph is a reference CYCLE (grad_fn <-> ctx
+        # <-> saved tensors): refcounting cannot free it, so every retry OOM'd against its
+        # own zombie (observed live on the L4: ~21 GB still "allocated" at a 1-sequence
+        # attempt). Force collection before retrying; empty_cache then drops the blocks.
+        gc.collect()
+        torch.cuda.empty_cache()

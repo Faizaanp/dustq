@@ -268,10 +268,13 @@ def test_microbatch_gradient_equivalence():
 
 def test_oom_chunk_caching(monkeypatch):
     # After the first OOM, later steps must start at the cached chunk count instead of
-    # re-paying a wasted full-batch OOM every step (matters at 610-step budgets).
+    # re-paying a wasted full-batch OOM every step (matters at 610-step budgets). The
+    # zombie graph (a reference cycle left by the failed attempt) must be collected
+    # between retries, outside the except block.
     import types
     from dustq import backprop_ext
     calls = []
+    gc_calls = []
 
     def fake(model, optimizer, x, y, n):
         calls.append(n)
@@ -280,9 +283,12 @@ def test_oom_chunk_caching(monkeypatch):
         return 1.0
 
     monkeypatch.setattr(backprop_ext, "_bp_step", fake)
+    monkeypatch.setattr(backprop_ext.gc, "collect", lambda: gc_calls.append(1))
     model = types.SimpleNamespace()
     x = types.SimpleNamespace(is_cuda=True)
     assert backprop_ext.train_step(model, None, x, None) == 1.0
     assert calls == [1, 2] and model._bp_microbatches == 2
+    assert gc_calls, "must collect the zombie graph between attempts"
     assert backprop_ext.train_step(model, None, x, None) == 1.0
     assert calls == [1, 2, 2], "second step must start at the cached chunk count"
+    assert len(gc_calls) == 1, "cached (non-OOM) steps must not re-collect"

@@ -35,6 +35,7 @@ from dust import DEFAULT_CONFIGS, load_sequences  # noqa: E402
 from dust import make_optimizer as dust_make_optimizer  # noqa: E402
 
 
+@torch.no_grad()  # upstream dust.evaluate is no_grad; without it a backprop model (requires_grad=True) builds a 32-sequence autograd graph and OOMs on the L4
 def evaluate(model, rows, device, dtype: str = "auto", batch_size: int = 32) -> float:
     total, tokens = 0.0, 0
     use_bf16 = device.type == "cuda" and dtype != "fp32"

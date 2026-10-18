@@ -292,3 +292,15 @@ def test_oom_chunk_caching(monkeypatch):
     assert backprop_ext.train_step(model, None, x, None) == 1.0
     assert calls == [1, 2, 2], "second step must start at the cached chunk count"
     assert len(gc_calls) == 1, "cached (non-OOM) steps must not re-collect"
+
+
+def test_evaluate_runs_without_grad():
+    # Regression: backprop models have requires_grad=True; evaluate() must be no_grad
+    # (upstream parity) or it builds an autograd graph and OOMs the L4 at M size.
+    from dustq.runner import build_model
+    model = build_model(precision="fp", seed=0).requires_grad_(True)
+    seen = []
+    handle = model.register_forward_hook(lambda m, a, o: seen.append(torch.is_grad_enabled()))
+    evaluate(model, torch.randint(0, 4096, (2, 129)), torch.device("cpu"))
+    handle.remove()
+    assert seen == [False]

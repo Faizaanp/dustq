@@ -131,18 +131,23 @@ def test_size_forwards(size):
 
 
 def test_precision_spellings():
-    # B3: dotted and run-id spellings both accepted.
-    assert qmodel.parse_precision("w1.58a4") == ("ternary", 4, "absmax")
-    assert qmodel.parse_precision("w1p58a4") == ("ternary", 4, "absmax")
-    assert qmodel.parse_precision("W1_58_A2") == ("ternary", 2, "absmax")
+    # B3: dotted and run-id spellings both accepted. A4/A2 route to the calibrated
+    # alpha scheme (Plan v3.1 4.2); A8 keeps absmax.
+    assert qmodel.parse_precision("w1.58a4") == ("ternary", 4, "mse_alpha")
+    assert qmodel.parse_precision("w1p58a4") == ("ternary", 4, "mse_alpha")
+    assert qmodel.parse_precision("w1.58a2") == ("ternary", 2, "mse_alpha")
+    assert qmodel.parse_precision("w1.58a8") == ("ternary", 8, "absmax")
+    assert qmodel.parse_precision("W1_58_A2") == ("ternary", 2, "mse_alpha")
 
 
 def test_swap_preserves_dtype_and_device():
-    # B4: the QLinear swap must be transparent to device and dtype.
+    # B4: the QLinear swap must be transparent to device; the latent is normalized to
+    # fp32 (bf16 latents flip codes — arXiv:2610.07853; enforced in QLinear.__init__).
     src = torch.nn.Linear(8, 8, bias=False).to(torch.bfloat16)
     q = swap_linear(src, "ternary")
-    assert q.weight.dtype == src.weight.dtype and q.weight.device == src.weight.device
-    assert q.effective_weight().dtype == src.weight.dtype
+    assert q.weight.device == src.weight.device
+    assert q.weight.dtype == torch.float32, "latent must be fp32"
+    assert q.effective_weight().dtype == torch.float32
 
 
 def test_act_quantizer_fp32_math():

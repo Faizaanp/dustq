@@ -61,7 +61,10 @@ def run_dust(precision: str = "fp", steps: int = 3, population: int = 256, token
     estimator = DUSTQ(model, settings, seed=seed, sigmas=sigmas)
     if precision != "fp":
         _, act_bits, act_scheme = qmodel.parse_precision(precision)
+        if act_scheme == "mse_alpha":
+            act_scheme = "absmax"  # smoke harness: no calibrated table required
         qmodel.register_act_hooks(model, act_bits, act_scheme, allow_lowbit_absmax=True)  # AFTER DUSTQ: noise -> quantize
+        qmodel.set_exact_path(model, enabled=True)
     optimizer = dust_make_optimizer(model, settings)
     x, y = tiny_batch(torch.device(device) if isinstance(device, str) else device)
     losses = []
@@ -79,6 +82,8 @@ def run_backprop(precision: str = "w1.58a4", steps: int = 3, seed: int = 0,
     model = build_model(cfg, precision, device, seed).requires_grad_(True)
     if precision != "fp":
         _, act_bits, act_scheme = qmodel.parse_precision(precision)
+        if act_scheme == "mse_alpha":
+            act_scheme = "absmax"  # smoke harness: no calibrated table required
         qmodel.register_act_hooks(model, act_bits, act_scheme, allow_lowbit_absmax=True)
     optimizer = make_bp_optimizer(model, lr, momentum)
     x, y = tiny_batch(torch.device(device) if isinstance(device, str) else device)

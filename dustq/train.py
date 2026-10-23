@@ -99,15 +99,22 @@ class Runner:
                 _force_fp32(self.model, self.estimator)
             if cfg.precision != "fp":  # AFTER estimator: hook order noise -> quantize
                 _, bits, scheme = qmodel.parse_precision(cfg.precision)
+                if cfg.task == "smoke":
+                    scheme = "absmax"  # smoke runs do not require the calibrated table
                 qmodel.register_act_hooks(self.model, bits, scheme,
-                                          allow_lowbit_absmax=(cfg.task == "smoke"))
+                                          allow_lowbit_absmax=(cfg.task == "smoke"),
+                                          ste_mode=cfg.ste_mode)
+                qmodel.set_exact_path(self.model, enabled=True)  # DUST estimator path
             self.optimizer = dust_make_optimizer(self.model, settings)
         else:
             self.model.requires_grad_(True)
             if cfg.precision != "fp":
                 _, bits, scheme = qmodel.parse_precision(cfg.precision)
+                if cfg.task == "smoke":
+                    scheme = "absmax"  # smoke runs do not require the calibrated table
                 qmodel.register_act_hooks(self.model, bits, scheme,
-                                          allow_lowbit_absmax=(cfg.task == "smoke"))
+                                          allow_lowbit_absmax=(cfg.task == "smoke"),
+                                          ste_mode=cfg.ste_mode)
             self.optimizer = make_bp_optimizer(self.model, cfg.lr, cfg.momentum)
 
     def _load_data(self):

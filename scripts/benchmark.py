@@ -37,8 +37,11 @@ def make_job(size: str, population: int, precision: str, device, scale: str):
     estimator = DUSTQ(model, settings, seed=0)
     if precision != "fp":
         _, bits, scheme = qmodel.parse_precision(precision)
+        if scheme == "mse_alpha":
+            scheme = "absmax"  # benchmark: timing is scale-scheme-independent
         # C5: benchmark timing is scale-scheme-independent, so low-bit absmax is allowed here
         qmodel.register_act_hooks(model, bits, scheme, allow_lowbit_absmax=True)
+        qmodel.set_exact_path(model, enabled=True)  # measure the real (exact) path
     optimizer = dust_make_optimizer(model, settings)
     x, y = tiny_batch(device, seed=7, sequences=8, length=model.config.sequence_len,
                        vocab=model.config.vocab_size)

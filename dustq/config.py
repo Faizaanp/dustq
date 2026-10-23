@@ -55,6 +55,7 @@ class RunConfig:
     lr: float | None = None             # None -> upstream tuned default for the cell
     momentum: float | None = None
     sigmas: dict | None = None          # None -> DUSTQ defaults (upstream literals)
+    ste_mode: str = "identity"          # identity = BP-STE; smoothed = BP-SSTE (T5)
     dtype: str = "auto"                 # auto = bf16 on CUDA, fp32 on CPU; or "fp32"
     data_dir: str = "data"              # where train_/val/test .pt live; "synthetic" for smoke
     output_dir: str = "results"

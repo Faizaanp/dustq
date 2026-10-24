@@ -29,6 +29,20 @@ DRIVE_DATA = "/content/drive/MyDrive/dustq/data"
 DRIVE_RESULTS = "/content/drive/MyDrive/dustq/results"
 CU_BURN_RATE = "1.54"
 
+def run_checked(cmd, **kwargs):
+    """subprocess.run with captured output; on failure, print the tails before raising —
+    never let an inner crash's message vanish like the Tier-R OOM notes did."""
+    result = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
+    if result.returncode != 0:
+        print("COMMAND FAILED:", " ".join(cmd), flush=True)
+        print("--- stdout tail ---\n" + result.stdout[-2500:], flush=True)
+        print("--- stderr tail ---\n" + result.stderr[-4000:], flush=True)
+        raise SystemExit(f"exit {result.returncode}; see tails above")
+    if result.stdout.strip():
+        print(result.stdout[-1500:], flush=True)
+    return result
+
+
 # ---- 0. environment ----
 import torch
 T_CELL0 = time.monotonic()
@@ -42,7 +56,7 @@ base = Path("/content/dustq-repo")
 root = next(p for p in [base] + [q for q in base.iterdir() if q.is_dir()] if (p / "dustq").is_dir())
 os.chdir(root)
 print("repo at:", root)
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "pyyaml"], check=True)
+run_checked([sys.executable, "-m", "pip", "install", "-q", "pyyaml"])
 
 from google.colab import drive
 drive.mount("/content/drive")
@@ -51,13 +65,13 @@ for name in ("train_1M.pt", "train_10M.pt", "val.pt", "test.pt"):
 if not Path("data").exists():
     os.symlink(DRIVE_DATA, "data")
 Path(DRIVE_RESULTS).mkdir(parents=True, exist_ok=True)
-subprocess.run([sys.executable, "-m", "pytest", "tests/test_cuda.py", "-q"], check=True)
+run_checked([sys.executable, "-m", "pytest", "tests/test_cuda.py", "-q"])
 print("sanity ok")
 
 # ---- 1. post-T5 benchmark (validates the code-caching speedup) ----
-subprocess.run([sys.executable, "scripts/benchmark.py", "--device", "cuda", "--scale", "real",
-                "--sizes", "S,M", "--populations", "256,1024", "--precisions", "fp,w1.58a4",
-                "--steps", "2", "--skip-concurrent"], check=True)
+run_checked([sys.executable, "scripts/benchmark.py", "--device", "cuda", "--scale", "real",
+             "--sizes", "S,M", "--populations", "256,1024", "--precisions", "fp,w1.58a4",
+             "--steps", "2", "--skip-concurrent"])
 print("PASTE the benchmark table back — it re-prices the CUT_CELLS restores.")
 
 # ---- 2. S/1M backprop fp checkpoint (PCKPT P0) ----
@@ -75,9 +89,9 @@ else:
 # ---- 3. alpha_b calibration (Plan 4.2; frozen table; never learned) ----
 alpha_path = Path("configs/alpha_calibrated.json")
 if not alpha_path.exists():
-    subprocess.run([sys.executable, "scripts/calibrate_alpha.py",
-                    "--checkpoint", str(Path(DRIVE_RESULTS) / p0_cfg.run_id / "best.pt"),
-                    "--batches", "8"], check=True)
+    run_checked([sys.executable, "scripts/calibrate_alpha.py",
+                 "--checkpoint", str(Path(DRIVE_RESULTS) / p0_cfg.run_id / "best.pt"),
+                 "--batches", "8"])
 print("PASTE this JSON back (canonical repo needs it):")
 print(alpha_path.read_text())
 Path("/content/drive/MyDrive/dustq/alpha_calibrated.json").write_text(alpha_path.read_text())
@@ -86,7 +100,7 @@ Path("/content/drive/MyDrive/dustq/alpha_calibrated.json").write_text(alpha_path
 cmd = [sys.executable, "scripts/run_queue.py", "--configs-dir", "configs",
        "--results-dir", DRIVE_RESULTS, "--cu-burn-rate", CU_BURN_RATE, "--retry-failed"]
 print(" ".join(cmd), flush=True)
-subprocess.run(cmd, check=True)
+run_checked(cmd)
 
 # ---- 5. G1 single-batch gradient cosine: fp32 vs bf16 (Plan T4/G1) ----
 from dustq import qmodel

@@ -12,5 +12,6 @@ runs/
 /prepare_data.py
 
 *.zip
+results_local/
 docs/PUBLICATION_STAGES.md
 

@@ -139,6 +139,8 @@ losses = runner.run_dust(precision="w1.58a4", steps=3, population=256)
 print("Step losses:", losses)
 ```
 
+> **Compute rule (owner, 2026-10-24):** the local machine runs the test suite and smoke steps only. Any real-data training, calibration, benchmarking, or probing runs on Colab.
+
 ---
 
 ## Model Sizes & Supported Precisions

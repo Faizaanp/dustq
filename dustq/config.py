@@ -84,7 +84,12 @@ class RunConfig:
     @property
     def run_id(self) -> str:
         k = self.population if self.method == "dust" else 0
-        return f"{self.size}_{self.tokens}_{sanitize(self.precision)}_{self.method}_K{k}_s{self.seed}"
+        base = f"{self.size}_{self.tokens}_{sanitize(self.precision)}_{self.method}_K{k}_s{self.seed}"
+        # dtype suffix only on non-auto runs (G1 fp32 reruns must not collide with the
+        # existing bf16 run in the same results dir — the queue skips by run_id)
+        if self.dtype == "fp32":
+            base += "_fp32"
+        return base
 
     def model_kwargs(self) -> dict:
         if self.size == "tiny":

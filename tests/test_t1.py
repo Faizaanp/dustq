@@ -232,7 +232,13 @@ def test_queue_failure_marker(tmp_path):
 
 def test_benchmark_end_to_end_tiny():
     # B2/B3 class guard: the benchmark script must run end to end (aliases + spellings),
-    # incl. the quantized cells, and write its report.
+    # incl. the quantized cells, and write its report. Aliases must all resolve to SIZES.
+    import importlib.util
+    from dustq.config import SIZES
+    spec = importlib.util.spec_from_file_location("bench_mod", "scripts/benchmark.py")
+    bench = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bench)
+    assert all(bench.SIZE_ALIASES[a] in SIZES for a in ("S", "M"))
     r = subprocess.run([sys.executable, "scripts/benchmark.py", "--device", "cpu", "--scale", "tiny",
                         "--sizes", "S", "--populations", "256", "--precisions", "fp,w1.58a4",
                         "--steps", "1", "--skip-concurrent"], capture_output=True, text=True)

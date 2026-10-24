@@ -89,6 +89,8 @@ def main():
     parser.add_argument("--precisions", default="fp,w1.58a4")
     parser.add_argument("--steps", type=int, default=3, help="measured steps per cell")
     parser.add_argument("--skip-concurrent", action="store_true", help="skip the 2-worker test (fast paths)")
+    parser.add_argument("--mem16-probe", action="store_true",
+                        help="also measure the nrep=16 (K=16384) memory ceiling on M (~26 min)")
     # worker mode (spawned by concurrent_test; also usable by hand)
     parser.add_argument("--worker", action="store_true", help="run ONE job and print JSON timing")
     parser.add_argument("--worker-size", default="L4d256")
@@ -135,16 +137,18 @@ def main():
                              peak_gb="", note=f"error: {str(exc)[:120]}"))
             print(f"{size} K={population} {precision}: FAILED — {str(exc)[:120]}", flush=True)
 
-    # nrep=16 memory probe (K=16384) at real scale, best effort.
+    # nrep=16 memory probe (K=16384) at real scale, opt-in (--mem16-probe): ~26 min on
+    # its own; the matrix tops at nrep=8 and the extrapolation is already recorded.
     mem16 = None
-    if args.scale == "real":
+    if args.scale == "real" and args.mem16_probe:
+        probe_size = SIZE_ALIASES.get("M", "M")  # aliases must resolve here too (B2-class bug)
         try:
-            _, peak = measure("M", 16384, "fp", device, args.scale, 1)
+            _, peak = measure(probe_size, 16384, "fp", device, args.scale, 1)
             mem16 = round(peak, 2)
-            rows.append(dict(size="M", K=16384, precision="fp", s_per_step="", peak_gb=mem16,
+            rows.append(dict(size=probe_size, K=16384, precision="fp", s_per_step="", peak_gb=mem16,
                              note="nrep=16 memory probe (1 step)"))
         except RuntimeError as exc:
-            rows.append(dict(size="M", K=16384, precision="fp", s_per_step="", peak_gb="",
+            rows.append(dict(size=probe_size, K=16384, precision="fp", s_per_step="", peak_gb="",
                              note=f"nrep=16 probe OOM/error: {str(exc)[:200]}"))
 
     conc = None

@@ -177,6 +177,49 @@ def probe_reference(ctx, k_total: int = 16384) -> tuple[dict, dict, float]:
     return g1, g2, reliability
 
 
+def probe_averaging_test(ctx, ns=(256, 1024, 4096), trials: int = 5, seed: int = 0) -> dict:
+    """Watch lead (2026-10-31, OPEN_QUESTIONS 37; cf. Apical Dust's Averaging Test):
+    per-tensor estimator BIAS vs population N, on a fixed batch. For each N, run
+    `trials` independent estimates g_i and report, per tensor,
+    mean_i <g_i, g_ref> - |g_ref|^2 / 2 ... i.e. the bias component along the reference
+    direction: bias_N = mean_i <g_i, g_ref>/||g_ref|| - ||g_ref||/2. A non-decaying
+    bias_N at large N is systematic estimator bias that the cosine ladder cannot see
+    (cosine measures alignment only; this measures offset along the true direction).
+    Honest limitation: DUSTQ.step() does not expose single-draw estimates, so the test
+    uses `trials` independent K=N estimates; single-N draws would sharpen it but need an
+    upstream hook (recorded in OPEN_QUESTIONS). Runs entirely without training."""
+    ref = ctx.dust_grads(seed=seed, population=16384 // 4)  # 4096 preset reference
+    ref_norm = {g: r.norm().item() for g, r in ref.items()}
+    out = {}
+    for n in ns:
+        dots, devs = {}, {}
+        for t in range(trials):
+            g = ctx.dust_grads(seed=seed + t * 5000, population=n)
+            for name, r in ref.items():
+                if name not in g:
+                    continue
+                dots.setdefault(name, []).append(torch.dot(g[name], r).item())
+                devs.setdefault(name, []).append(g[name] - r)
+        out[n] = {name: {
+            "bias_along_ref": sum(dots[name]) / trials / max(ref_norm[name], 1e-12) - ref_norm[name] / 2,
+            "rms_dev": torch.stack([d.norm() for d in devs[name]]).mean().item(),
+        } for name in dots}
+    return out
+
+
+def probe_per_tensor_cosine(ctx, reference, populations=(256, 1024)) -> dict:
+    """Watch lead (2026-10-31, OPEN_QUESTIONS 37; cf. the Noise fork's check_quant.py):
+    the same cosines as probe 2 but per PARAMETER TENSOR rather than per group — the
+    fork's harness is per-tensor, so this cross-checks our grouped numbers against
+    the external convention. Returns {population: {param_name: cos}}."""
+    out = {}
+    for k in populations:
+        g = ctx.dust_grads(seed=0, population=k)
+        out[k] = {name: cosine(g[name], reference[name])
+                  for name in reference if name in g}
+    return out
+
+
 def probe_cosine_ladders(ctx, populations=(256, 1024, 4096), reference=None) -> dict:
     """Probe 2: cos(Dust-K, ref) per layer type vs K, disattenuated by the halves'
     reliability. Returns {population: {group: cos}} and the same raw (un-corrected)."""

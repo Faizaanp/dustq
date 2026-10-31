@@ -31,12 +31,15 @@ ACT_QUANT_SITES = WEIGHT_QUANT_SITES  # inputs of the weight-quantized Linears
 _UNSIGNED_SITES = ("mlp.c_proj",)  # post-ReLU^2 input uses the unsigned grid
 
 
-def set_exact_path(model: nn.Module, enabled: bool) -> None:
+def set_exact_path(model: nn.Module, enabled: bool, mode: str | None = None) -> None:
     """Enable QLinear's integer-code path (Dust runs only: BP-STE/SSTE keep fake-quant
-    train-eval consistency by design; Plan v3.1 4.2)."""
+    train-eval consistency by design; Plan v3.1 4.2). `mode`: "tf32" (default; exact +
+    tensor cores), "fp32" (exact, slow), or "fake" (dequantized fake-quant comparator)."""
     for module in model.modules():
         if isinstance(module, QLinear):
             module._exact_path = enabled
+            if mode is not None:
+                module._exact_mode = mode
 
 
 def site_sigma(name: str, n_layer: int) -> float:
@@ -91,20 +94,32 @@ _ALPHA_TABLE_PATH = Path(__file__).resolve().parents[1] / "configs" / "alpha_cal
 _ALPHA_TABLE: dict | None = None
 
 
-def calibrated_alpha(bits: int, unsigned: bool) -> float:
+def calibrated_alpha(bits: int, unsigned: bool, path: Path | None = None) -> float:
     """alpha_b calibrated once on a backprop fp checkpoint (Plan v3.1 4.2), frozen in
-    configs/alpha_calibrated.json by scripts/calibrate_alpha.py; never learned."""
+    configs/alpha_calibrated.json by scripts/calibrate_alpha.py; never learned.
+
+    The JSON is {"provenance": ..., "alpha": {a8s..a2u}, "detail": ...} - values are read
+    from the nested "alpha" mapping (a top-level lookup was a live bug: every A4/A2 run
+    failed with KeyError until the 2026-10-31 fix).
+    """
     global _ALPHA_TABLE
+    if path is not None:
+        table = json.loads(Path(path).read_text()).get("alpha", {})
+        key = f"a{bits}{'u' if unsigned else 's'}"
+        if key not in table:
+            raise KeyError(f"no calibrated alpha for {key} in {path}")
+        return float(table[key])
     if _ALPHA_TABLE is None:
         if not _ALPHA_TABLE_PATH.is_file():
             raise FileNotFoundError(
                 "configs/alpha_calibrated.json is missing: run scripts/calibrate_alpha.py "
                 "(needs a backprop fp checkpoint) before any A4/A2 training/probe run")
         _ALPHA_TABLE = json.loads(_ALPHA_TABLE_PATH.read_text())
+    alphas = _ALPHA_TABLE.get("alpha", _ALPHA_TABLE)
     key = f"a{bits}{'u' if unsigned else 's'}"
-    if key not in _ALPHA_TABLE:
+    if key not in alphas:
         raise KeyError(f"no calibrated alpha for {key}; recalibrate")
-    return float(_ALPHA_TABLE[key])
+    return float(alphas[key])
 
 
 def register_act_hooks(model: nn.Module, bits: int, scheme: str = "absmax",
@@ -138,11 +153,16 @@ def register_act_hooks(model: nn.Module, bits: int, scheme: str = "absmax",
             continue
         unsigned = site in _UNSIGNED_SITES
         sigma = site_sigma(name, n_layer)
-        if scheme == "mse_alpha" and alpha is None:
-            alpha = calibrated_alpha(bits, unsigned)  # frozen table (Plan v3.1 4.2)
+        # NB: don't reassign the `alpha` parameter here — signed and unsigned sites need
+        # different calibrated values (a{bits}s vs a{bits}u), and this loop visits both in
+        # one call. Mutating `alpha` made every site after the first reuse that first site's
+        # value regardless of its own signedness.
+        site_alpha = alpha
+        if scheme == "mse_alpha" and site_alpha is None:
+            site_alpha = calibrated_alpha(bits, unsigned)  # frozen table (Plan v3.1 4.2)
 
         def make_hook(bits=bits, unsigned=unsigned, scheme=scheme, ste_mode=ste_mode,
-                      sigma=sigma, alpha=alpha):
+                      sigma=sigma, alpha=site_alpha):
             def hook(module, args):
                 x = args[0]
                 if not x.is_floating_point():

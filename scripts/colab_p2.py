@@ -103,7 +103,7 @@ print(" ".join(cmd), flush=True)
 run_checked(cmd)
 
 # ---- 5. G1 single-batch gradient cosine: fp32 vs bf16 (Plan T4/G1) ----
-from dustq import qmodel
+from dustq.config import SIZES
 from dustq.dust_ext import DUSTQ
 from dustq.recipes import recipe
 from dustq.runner import build_model, tiny_batch
@@ -114,7 +114,7 @@ x = rows[:, :-1].contiguous().cuda()
 y = rows[:, 1:].contiguous().cuda()
 cosines = {}
 for dtype_name, dtype in (("bf16", None), ("fp32", torch.float32)):
-    model = build_model(qmodel.SIZES["L8d512"], "fp", "cuda", seed=0).requires_grad_(False)
+    model = build_model(SIZES["L8d512"], "fp", "cuda", seed=0).requires_grad_(False)
     settings = recipe("1M", 256, model.config.n_layer)
     est = DUSTQ(model, settings, seed=0)
     if dtype is not None:

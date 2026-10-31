@@ -86,6 +86,7 @@ class QLinear(nn.Linear):
         # Exact integer-code path is DUST-only (set by qmodel.set_exact_path): BP-STE
         # and BP-SSTE keep the same fake-quant forward in train and eval by design.
         self._exact_path = False
+        self._exact_mode = "tf32"  # tf32 exact for small ints + tensor cores; "fp32" | "fake" comparators
 
     def _codes_and_gamma(self):
         w = self.weight
@@ -108,19 +109,35 @@ class QLinear(nn.Linear):
         w = self.weight
         return w + (gamma * codes - w).detach()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _exact_forward(self, x):
+        """Integer-code path (T5/4.2): used when no backward is needed (DUST's forward-only
+        estimator). Modes (benchmark with --exact-mode to settle attribution):
+        - "tf32" (default): small-integer codes (<=2^8 for A8/int8-W; {0,1} for ternary)
+          are exact in TF32 inputs, products exact in fp32 accumulation, so TF32 tensor
+          cores give the exact result at tensor-core speed. (The original fp32 path was
+          bit-exact but non-tensor: measured ~1.5x SLOWER than the pre-T5 bf16 fake-quant
+          path, 2026-10-31 - see docs/reports/T5.md addendum. TF32 restores parity while
+          staying exact.) Falls back to fp32 on CPU (no TF32 to use).
+        - "fp32": exact but non-tensor; the slow reference.
+        - "fake": the dequantized fake-quant matmul (pre-T5 semantics); controls the
+          attribution experiment.
+        Autograd runs (BP-STE/BP-SSTE) never take this path, so the weight STE flows.
+        """
         codes, gamma = self._codes_and_gamma()
-        # Exact integer-code path (T5/4.2): used when no backward is needed (DUST's
-        # forward-only estimator). Integer codes multiply exactly in fp32 accumulation
-        # (|term| <= 127*127*4096 < 2^24), rescaled once in fp32 — no bf16 rounding can
-        # move grid points. Autograd runs (BP-STE/BP-SSTE) take the fake-quant path so
-        # the weight STE flows.
+        if self._exact_mode == "fake":
+            return F.linear(x, self.effective_weight(), self.bias)
+        if self._exact_mode != "tf32" or not x.is_cuda:
+            acc = self._act_codes.to(torch.float32) @ codes.to(torch.float32).transpose(0, 1)
+        else:
+            acc = _tf32_int_matmuls(self._act_codes.to(torch.float32),
+                                    codes.to(torch.float32).transpose(0, 1))
+        y = acc * self._act_scale.to(torch.float32) * gamma.to(torch.float32)
+        return y + self.bias if self.bias is not None else y
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        codes, _ = self._codes_and_gamma()  # keep the cache warm even on autograd paths
         if self._exact_path and not torch.is_grad_enabled() and self._act_codes is not None:
-            with torch.autocast(device_type="cuda", enabled=False):
-                acc = self._act_codes.to(torch.float32) @ codes.to(torch.float32).transpose(0, 1)
-                y = acc * self._act_scale.to(torch.float32) * gamma.to(torch.float32)
-            if self.bias is not None:
-                y = y + self.bias
+            y = self._exact_forward(x)
             self._act_codes = None
             self._act_scale = None
             return y
@@ -184,6 +201,37 @@ def sste_act_quantize(x: torch.Tensor, bits: int, unsigned: bool = False,
     else:
         raise ValueError(f"unknown activation scheme {scheme!r}")
     return _SSTEActQuant.apply(x, scale, lo, hi, sigma)
+
+
+def _tf32_int_matmuls(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """a @ b with TF32 enabled, for small-integer fp32 inputs: TF32 keeps 11 significant
+    bits, so |code| <= 256 is exact; products <= 2^16 are exact in fp32 accumulation for
+    any realistic contraction dim. Restores the previous matmul precision setting after."""
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = True
+    except Exception:
+        try:
+            torch.backends.cuda.matmul.fp32_precision = "tf32"  # torch >= 2.9 naming
+        except Exception:
+            pass
+    try:
+        return a @ b
+    finally:
+        try:
+            torch.backends.cuda.matmul.allow_tf32 = False
+        except Exception:
+            try:
+                torch.backends.cuda.matmul.fp32_precision = "ieee"
+            except Exception:
+                pass
+
+
+def set_exact_mode(model: nn.Module, mode: str) -> None:
+    if mode not in ("tf32", "fp32", "fake"):
+        raise ValueError(f"unknown exact mode {mode!r}")
+    for module in model.modules():
+        if isinstance(module, QLinear):
+            module._exact_mode = mode
 
 
 def swap_linear(module: nn.Linear, mode: str) -> QLinear:

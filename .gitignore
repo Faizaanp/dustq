@@ -15,3 +15,7 @@ runs/
 results_local/
 docs/PUBLICATION_STAGES.md
 
+
+# Temporary experimentation and monitoring
+temp/
+.env

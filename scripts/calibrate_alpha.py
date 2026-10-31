@@ -73,6 +73,26 @@ def quant_mse(x: torch.Tensor, bits: int, unsigned: bool, alpha: float) -> float
     return (err ** 2).mean().item()
 
 
+def _calibrate(x: torch.Tensor, bits: int, unsigned: bool, coarse_n: int = 32) -> tuple[float, float, bool]:
+    """Two-stage search over log(alpha) in [-2, 2.2] (0.01 x to 158 x mean|x|; ~4 orders):
+    coarse grid, then refine within the winning cell. 2026-10-31: the first calibration
+    used a fixed [0.40, 3.20] linear grid and 3/6 optima pinned at the boundaries
+    (a4u mse 0.177, a2u mse 0.665 — near-all-zero codes). Returns (alpha, mse, at_bounds)."""
+    lo_exp, hi_exp = -2.0, 2.2
+    coarse = [lo_exp + (hi_exp - lo_exp) * i / (coarse_n - 1) for i in range(coarse_n)]
+    vals = [quant_mse(x, bits, unsigned, 10 ** e) for e in coarse]
+    i = min(range(coarse_n), key=vals.__getitem__)
+    step = (hi_exp - lo_exp) / (coarse_n - 1)
+    rlo = max(coarse[max(i - 1, 0)], lo_exp)
+    rhi = min(coarse[min(i + 1, coarse_n - 1)], hi_exp)
+    fine = [rlo + (rhi - rlo) * j / 20 for j in range(21)]
+    fvals = [quant_mse(x, bits, unsigned, 10 ** e) for e in fine]
+    j = min(range(21), key=fvals.__getitem__)
+    best_exp = fine[j]
+    at_bounds = best_exp <= lo_exp + step / 2 or best_exp >= hi_exp - step / 2
+    return 10 ** best_exp, fvals[j], at_bounds
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
@@ -95,18 +115,18 @@ def main():
     table, report = {}, {}
     for bits in args.bits:
         for tag, x in (("s", signed), ("u", unsigned)):
-            mses = [quant_mse(x, bits, tag == "u", a) for a in args.grid]
-            best = min(range(len(mses)), key=mses.__getitem__)
+            alpha, mse, at_bounds = _calibrate(x, bits, tag == "u")
             key = f"a{bits}{tag}"
-            table[key] = args.grid[best]
-            report[key] = {"alpha": args.grid[best], "mse": mses[best]}
-            print(f"{key}: alpha={args.grid[best]:.2f} mse={mses[best]:.6f}")
+            table[key] = alpha
+            report[key] = {"alpha": alpha, "mse": mse, "at_grid_bounds": at_bounds}
+            flag = "  <-- AT GRID BOUNDS, widen further" if at_bounds else ""
+            print(f"{key}: alpha={alpha:.4f} mse={mse:.6f}{flag}")
 
     payload = {
         "provenance": {
             "checkpoint": str(args.checkpoint),
             "data": f"{args.data_dir}/train_1M.pt (first {args.batches} batches)",
-            "grid": [args.grid[0], args.grid[-1], f"step {args.grid[1]-args.grid[0]}"],
+            "grid": "two-stage log-alpha in [-2.0, 2.2] (0.01x..158x mean|x|), 32pt coarse + 21pt refine",
             "sites": "signed: c_q/c_k/c_v + o@l + c_fc inputs; unsigned: mlp.c_proj input",
             "rule": "scale = alpha_b * mean|x| per token; argmin MSE over the grid",
         },

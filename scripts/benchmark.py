@@ -30,7 +30,7 @@ ensure_upstream_on_path()
 from dust import make_optimizer as dust_make_optimizer  # noqa: E402
 
 
-def make_job(size: str, population: int, precision: str, device, scale: str):
+def make_job(size: str, population: int, precision: str, device, scale: str, exact_mode: str = "tf32"):
     kwargs = dict(TINY) if scale == "tiny" else dict(SIZES[size])
     model = build_model(kwargs, precision, device, seed=0).requires_grad_(False)
     settings = recipe("1M", population, model.config.n_layer)
@@ -41,15 +41,19 @@ def make_job(size: str, population: int, precision: str, device, scale: str):
             scheme = "absmax"  # benchmark: timing is scale-scheme-independent
         # C5: benchmark timing is scale-scheme-independent, so low-bit absmax is allowed here
         qmodel.register_act_hooks(model, bits, scheme, allow_lowbit_absmax=True)
-        qmodel.set_exact_path(model, enabled=True)  # measure the real (exact) path
+        # measure the real (exact) integer-code path; mode settles the perf attribution
+        qmodel.set_exact_path(model, enabled=True, mode="fake" if exact_mode == "fake" else None)
+        if exact_mode != "fake":
+            from dustq.quant import set_exact_mode
+            set_exact_mode(model, exact_mode)
     optimizer = dust_make_optimizer(model, settings)
     x, y = tiny_batch(device, seed=7, sequences=8, length=model.config.sequence_len,
                        vocab=model.config.vocab_size)
     return estimator, optimizer, x, y
 
 
-def measure(size, population, precision, device, scale, steps):
-    estimator, optimizer, x, y = make_job(size, population, precision, device, scale)
+def measure(size, population, precision, device, scale, steps, exact_mode: str = "tf32"):
+    estimator, optimizer, x, y = make_job(size, population, precision, device, scale, exact_mode)
     estimator.step(x, y, optimizer)  # warmup
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
@@ -91,6 +95,8 @@ def main():
     parser.add_argument("--skip-concurrent", action="store_true", help="skip the 2-worker test (fast paths)")
     parser.add_argument("--mem16-probe", action="store_true",
                         help="also measure the nrep=16 (K=16384) memory ceiling on M (~26 min)")
+    parser.add_argument("--exact-mode", default="tf32", choices=["tf32", "fp32", "fake"],
+                        help="integer-code path mode for quantized cells (attribution experiment)")
     # worker mode (spawned by concurrent_test; also usable by hand)
     parser.add_argument("--worker", action="store_true", help="run ONE job and print JSON timing")
     parser.add_argument("--worker-size", default="L4d256")
@@ -125,7 +131,8 @@ def main():
                  for p in args.precisions.split(",")]
     for size, population, precision in cells:
         try:
-            s_per_step, peak = measure(size, population, precision, device, args.scale, args.steps)
+            s_per_step, peak = measure(size, population, precision, device, args.scale,
+                                       args.steps, args.exact_mode)
             rows.append(dict(size=size, K=population, precision=precision,
                              s_per_step=round(s_per_step, 3),
                              peak_gb=round(peak, 2) if peak == peak else ""))

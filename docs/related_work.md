@@ -330,6 +330,7 @@ Our project sits at the intersection of two threads that have so far met only in
 - Do not describe ZeroQAT's "quantized pre-training" as from-scratch â€” those experiments continue training *pretrained* Llama/OPT models under quantization; misdescribing it invites correction.
 - Do not claim backprop-free **quantized from-scratch pretraining in any architecture** â€” EGGROLL's EGG experiment took that cell (int8 RNN, weight-space ES; see Â§12 / WATCH 2026-10-16).
 - Do not claim quantized ZO **with node/activation perturbation in any setting** â€” Poor Man's Training (arXiv:2411.05873, the QuZO group) combines exactly that for MCU adaptation (see Â§12).
+- Do not claim the **first forward-only / backprop-free training of a quantized transformer from scratch in any form**: a Noise-benchmark fork claim (`kroggen/noise-speedrun`, branch `quant-int8-relay`, commit `fdaca522`, 2026-10-21; WATCH 2026-10-31, verdict ACT) already demonstrated forward-only from-scratch training of the exact Dust 37.7M architecture with int8 weights + per-token int8 dynamic activations and true int8 GEMMs (`torch._int_mm`) on the Dust 10M split (610 updates, seed 0, one RTX 5090; 3.8985 qat / 3.9251 int vs exact autograd at the quantized point 3.7007). It is a fork claim only â€” not merged, and built on Relay, ruled non-compliant by the maintainers on 2026-10-20 â€” but it establishes the protocol-level cell has an occupant. Our claims are confined to the compliant activation-space corner: Dust's node-perturbation estimator, ternary/int8 weights with A8/A4/A2 activations, matched token budgets against BP / BP-STE / BP-SSTE controls, transformer pretraining from scratch, and multi-seed reporting. Any Noise mention must cite the archived 10M tracks (rule change 2026-10-22: 10M archived, 30M live, Track 3) or pin a commit hash.
 
 ---
 
@@ -353,23 +354,34 @@ Our project sits at the intersection of two threads that have so far met only in
 New and newly-resolved references; full citations and fetch details in the WATCH report.
 
 **Resolves standing overlap items:**
-- **EGGROLL integer experiment (arXiv:2511.16652)** — RESOLVED from full text: from-scratch character-level pretraining of EGG (a minGRU RNN, no activation functions) with **int8 weights and integer activations**, under **weight-space** ES at populations up to 2^20; 3.40 vs 3.58 bits/byte vs a backprop transformer at ~180x GPU-hours; no STE/QAT baseline. Our differentiators: transformers, activation-space (virtual-population) credit, matched ZO-vs-STE-vs-SSTE comparison, modest-population regimes.
-- **AGZO (arXiv:2601.17261, ICML 2026; Lin et al.)** and **ZO-Act (arXiv:2607.01125; Dong et al.)** — both activation-*informed* weight-subspace ZO fine-tuning (they perturb weights in subspaces informed by activations, never activations themselves); no quantization overlap; disambiguate the names when citing; AIM-ZO (arXiv:2609.35257) is the third family member.
+- **EGGROLL integer experiment (arXiv:2511.16652)** ï¿½ RESOLVED from full text: from-scratch character-level pretraining of EGG (a minGRU RNN, no activation functions) with **int8 weights and integer activations**, under **weight-space** ES at populations up to 2^20; 3.40 vs 3.58 bits/byte vs a backprop transformer at ~180x GPU-hours; no STE/QAT baseline. Our differentiators: transformers, activation-space (virtual-population) credit, matched ZO-vs-STE-vs-SSTE comparison, modest-population regimes.
+- **AGZO (arXiv:2601.17261, ICML 2026; Lin et al.)** and **ZO-Act (arXiv:2607.01125; Dong et al.)** ï¿½ both activation-*informed* weight-subspace ZO fine-tuning (they perturb weights in subspaces informed by activations, never activations themselves); no quantization overlap; disambiguate the names when citing; AIM-ZO (arXiv:2609.35257) is the third family member.
 
 **New to us (missed by the 2026-10-11 scan or posted since):**
-- **Poor Man's Training on MCUs (arXiv:2411.05873; Zhao, Li, Young, Zhang — QuZO group)** — quantized ZO + **node perturbation** + sparse training for MCU adaptation of an image classifier; kills the "in any setting" phrase (section 10 updated).
-- **QES (arXiv:2602.03120; Xu, Schweighofer, Miikkulainen, Qiu)** — full-parameter ES fine-tuning directly in the quantized space of PTQ LLMs; the ES-at-Scale group has entered quantization (fine-tuning quadrant).
-- **TerMeZO (arXiv:2609.33548; Sifaou et al.)** — sparse ZO fine-tuning of BitNet models (ternary weights, 8-bit activations); ZO x BitNet now exists, fine-tuning only.
-- **CEWT (arXiv:2609.32659; Yang & Aamodt — FOGZO authors)** — backprop QAPT with post-update weight-histogram projection, down to 1-bit, up to 610M params; the FOGZO group is now the most active on quantized from-scratch pretraining, all with backprop+STE except FOGZO itself. Monthly author-level watch.
-- **BBQ (arXiv:2603.01599, ICLR 2026; Yang & Aamodt)** — entropy-optimal compute-efficient quantization for backprop QAPT, 1-4 bits.
-- **GRZO (arXiv:2606.02857, Findings of EMNLP 2026; Tan et al. — QuZO group)** — group-relative ZO normalization lifting sparse/low-rank/quantized ZO fine-tuning.
-- **AIM-ZO (arXiv:2609.35257; Xie et al.)** — third activation-informed-subspace ZO fine-tuning entry.
-- **QScheduler (arXiv:2607.18802; Do Amaral et al.)** — adaptive ZO query budgets; first INT8 on-device-training PoC on the STM32N6 NPU (vision).
-- **ZOA (arXiv:2508.02180; Deng et al.)** and **FOZO (arXiv:2603.04733, CVPR 2026; Wang & Wang)** — ZO test-time adaptation of quantized models (vision); TTA quadrant.
-- **Continual QAPT (arXiv:2502.11895; Nielsen et al.)** — 16-to-1.58-bit backprop+STE pretraining transition; background for our STE baselines.
-- **Lost in the bf16 Cast (arXiv:2610.07853; Sahai et al.)** — bf16-casting ternary latent weights before export flips 0.83-1.77% of shipped codes and can collapse accuracy; engineering caution for our QLinear: latent fp32 stays pinned, and T5 gains a dtype-pinning test.
-- **Noise benchmark (github.com/qlabs-eng/noise; Q Labs, Oct 2026)** — community speedrun for backprop-free pretraining on Dust's exact 37.7M model and our exact 10M FineWeb split; rules allow a quantized forward (none submitted yet); standing tripwire in docs/MONITORING.md.
+- **Poor Man's Training on MCUs (arXiv:2411.05873; Zhao, Li, Young, Zhang ï¿½ QuZO group)** ï¿½ quantized ZO + **node perturbation** + sparse training for MCU adaptation of an image classifier; kills the "in any setting" phrase (section 10 updated).
+- **QES (arXiv:2602.03120; Xu, Schweighofer, Miikkulainen, Qiu)** ï¿½ full-parameter ES fine-tuning directly in the quantized space of PTQ LLMs; the ES-at-Scale group has entered quantization (fine-tuning quadrant).
+- **TerMeZO (arXiv:2609.33548; Sifaou et al.)** ï¿½ sparse ZO fine-tuning of BitNet models (ternary weights, 8-bit activations); ZO x BitNet now exists, fine-tuning only.
+- **CEWT (arXiv:2609.32659; Yang & Aamodt ï¿½ FOGZO authors)** ï¿½ backprop QAPT with post-update weight-histogram projection, down to 1-bit, up to 610M params; the FOGZO group is now the most active on quantized from-scratch pretraining, all with backprop+STE except FOGZO itself. Monthly author-level watch.
+- **BBQ (arXiv:2603.01599, ICLR 2026; Yang & Aamodt)** ï¿½ entropy-optimal compute-efficient quantization for backprop QAPT, 1-4 bits.
+- **GRZO (arXiv:2606.02857, Findings of EMNLP 2026; Tan et al. ï¿½ QuZO group)** ï¿½ group-relative ZO normalization lifting sparse/low-rank/quantized ZO fine-tuning.
+- **AIM-ZO (arXiv:2609.35257; Xie et al.)** ï¿½ third activation-informed-subspace ZO fine-tuning entry.
+- **QScheduler (arXiv:2607.18802; Do Amaral et al.)** ï¿½ adaptive ZO query budgets; first INT8 on-device-training PoC on the STM32N6 NPU (vision).
+- **ZOA (arXiv:2508.02180; Deng et al.)** and **FOZO (arXiv:2603.04733, CVPR 2026; Wang & Wang)** ï¿½ ZO test-time adaptation of quantized models (vision); TTA quadrant.
+- **Continual QAPT (arXiv:2502.11895; Nielsen et al.)** ï¿½ 16-to-1.58-bit backprop+STE pretraining transition; background for our STE baselines.
+- **Lost in the bf16 Cast (arXiv:2610.07853; Sahai et al.)** ï¿½ bf16-casting ternary latent weights before export flips 0.83-1.77% of shipped codes and can collapse accuracy; engineering caution for our QLinear: latent fp32 stays pinned, and T5 gains a dtype-pinning test.
+- **Noise benchmark (github.com/qlabs-eng/noise; Q Labs, Oct 2026)** ï¿½ community speedrun for backprop-free pretraining on Dust's exact 37.7M model and our exact 10M FineWeb split; rules allow a quantized forward (none submitted yet); standing tripwire in docs/MONITORING.md.
 
 Positioning paragraph (section 9) and claim discipline (section 10) are amended as above;
 the two-axis landscape is unchanged: nothing found occupies (activation-space perturbation
 x low-bit quantized forward x from-scratch transformer pretraining x matched ZO-vs-STE).
+
+### Watch 2026-10-31 additions (ACT verdict; see docs/reports/WATCH/2026-10-31.md)
+
+- **Noise fork `quant-int8-relay`** (kroggen/noise-speedrun, commit fdaca522, 2026-10-21): forward-only int8-W/A8 from-scratch pretraining of the Dust 37.7M architecture on the Dust 10M split, true int8 GEMMs (torch._int_mm); 3.8985/3.9251 vs exact autograd 3.7007; built on Relay (ruled non-compliant 2026-10-20). Occupies the protocol-level cell; claim wording tightened (section 10).
+- **arXiv:2610.37842** (Oct 27, 2026; Vegesna et al. - Dust authors): data-constrained scaling study, backprop, no overlap; the authors remain active.
+- **arXiv:2610.22428**: from-scratch ternary pretraining at a training data scale of ~100B tokens (closest adjacent corner; backprop+STE).
+- **arXiv:2609.29397**: a re-examination of ternary ~60K-token-scale results; context for our small-scale framing.
+- **arXiv:2608.10103** (L4/SM89 PTX microbenchmark): INT8 1.4-1.8x and INT4 2.9-4.3x over WMMA on Ada - direct precedent for the gemm-int8/T5 caching lead on our actual GPU.
+- **arXiv:2608.11693**: B300 has no native INT8 tensor core (relevant if hardware changes).
+- **arXiv:2610.07853 v3** (bf16-cast ternary export audit): new seeds and LR sweep; our fp32-latent + dtype-pinning defenses are aligned.
+- **Averaging Test** (Saanviiyer, Apical Dust notes): per-tensor bias vs N = 1...4096 (plateau height = bias) - proposed as T6 probe machinery alongside the fork's per-tensor cosine harness (`tests/check_quant.py`); externally corroborates our measured 2.5-3.2x re-quantization overhead ("naive quantize/dequantize plumbing dominates; fused kernels would recover it").

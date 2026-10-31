@@ -41,11 +41,14 @@ SITE_GROUPS = {
 }
 
 
-def group_of(site: str) -> str:
+def group_of(param_name: str) -> str:
+    """Map a parameter name to its layer-type group (Plan v3.1 section 5). Parameter
+    names carry a trailing `.weight`, so match against the module path with it stripped."""
+    base = param_name[:-len(".weight")] if param_name.endswith(".weight") else param_name
     for key, name in SITE_GROUPS.items():
-        if site.endswith("." + key) or site == key:
+        if base == key or base.endswith("." + key):
             return name
-    return site
+    return param_name
 
 
 def collect_grads(model) -> dict[str, torch.Tensor]:

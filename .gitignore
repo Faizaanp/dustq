@@ -19,3 +19,6 @@ docs/PUBLICATION_STAGES.md
 # Temporary experimentation and monitoring
 temp/
 .env
+
+opencode.json
+.opencode/

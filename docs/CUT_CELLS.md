@@ -12,29 +12,31 @@ allowance, better GPU time, or freed schedule), or (b) the findings are good eno
 warrant the breadth (e.g., G2a/G3 pass with a clear result, or reviewers ask for it).
 
 **Update 2026-10-18: trigger (a) has fired** — the owner confirmed **300–400 CU/month**
-(~195–260 L4-h at the measured 1.52–1.54 CU/h), removing the CU constraint entirely. The
-binding constraints are now session wall-clock (one L4, sequential queue; concurrency
-measured negative at 0.35×) and the scooping clock — so the *execution order* is
-unchanged (preprint after G3, then expand), but **restore priorities 1–3 (~68 L4-h ≈
-104 CU) are promoted into the pre-submission plan** (they complete Figure 5's fp
-K-ladder and the 10M quantized cell — they strengthen the TMLR submission itself).
-Priorities 4–7 (~197 L4-h ≈ 300 CU — previously "someday") now fit comfortably inside a
-single later month and stay assigned to the journal version (T12). The default vehicle
-and all discipline rules below are unchanged.
+(≈155–206 L4-h at the owner-observed 1.94 CU/h of 2026-10-31; T1 measured 1.52 on
+2026-10-18), removing the CU constraint entirely. The binding constraints are now session
+wall-clock (one L4, sequential queue; concurrency measured negative at 0.35×) and the
+scooping clock — so the *execution order* is unchanged (preprint after G3, then expand),
+but **restore priorities 1–3 (~68 L4-h ≈ 132 CU) are promoted into the pre-submission
+plan** (they complete Figure 5's fp K-ladder and the 10M quantized cell — they strengthen
+the TMLR submission itself). Priorities 4–7 (~197 L4-h ≈ 382 CU — previously "someday")
+now fit inside roughly one later month of the allowance and stay assigned to the journal
+version (T12). The default vehicle and all discipline rules below are unchanged.
+CU figures below use the 1.94 rate (updated 2026-11-01 on the owner's observation; the
+1.52 T1 baseline is retained in OPEN_QUESTIONS for history).
 
-## Registry (prices at 2026-10-16 measured rates, ×1.52 CU/L4-h)
+## Registry (prices at 2026-10-16 L4-hour measurements, ×1.94 CU/L4-h)
 
 | # | Cell | As originally specced | After the cut | Runs to restore | Price (L4-h / CU) | Restore priority |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | B-S fp K=4k (S/1M, dust) | 3 seeds | 1 seed (s0) | 2 | 5.6 / 8.6 | 1 — completes the fp K-ladder |
-| 2 | Tier A P3 K=1k (S/10M, w1.58a4) | 3 seeds | 1 seed (s0) | 2 | 36.3 / 55 | 2 — 10M quantized at full CI |
-| 3 | B-M K=1k (M/1M, P2+P3) | 3 seeds | 1 seed (s0) per precision | 4 | 25.6 / 39 | 3 |
-| 4 | B-S quantized K=4k (P1–P4) | 3 seeds each | not run | 12 | 86.3 / 131 | 4 — journal version |
-| 5 | D1 (M/10M, P0+P3, K256) | 3 seeds | 1 seed per precision | 4 | 43.9 / 67 | 5 — journal, gated |
-| 6 | Tuning grid for P1/P2/P4 | 3-point × K{256,1k} | 2-point {1.0, 1.5}× | ~8 short runs | ~17 / 26 | 6 |
-| 7 | Tier A P2 (S/10M, w1.58a8) | "+P2 if budget allows" | not planned | 6 | 67.2 / 102 | 7 — journal |
+| 1 | B-S fp K=4k (S/1M, dust) | 3 seeds | 1 seed (s0) | 2 | 5.6 / 10.9 | 1 — completes the fp K-ladder |
+| 2 | Tier A P3 K=1k (S/10M, w1.58a4) | 3 seeds | 1 seed (s0) | 2 | 36.3 / 70.4 | 2 — 10M quantized at full CI |
+| 3 | B-M K=1k (M/1M, P2+P3) | 3 seeds | 1 seed (s0) per precision | 4 | 25.6 / 49.7 | 3 |
+| 4 | B-S quantized K=4k (P1–P4) | 3 seeds each | not run | 12 | 86.3 / 167.4 | 4 — journal version |
+| 5 | D1 (M/10M, P0+P3, K256) | 3 seeds | 1 seed per precision | 4 | 43.9 / 85.2 | 5 — journal, gated |
+| 6 | Tuning grid for P1/P2/P4 | 3-point × K{256,1k} | 2-point {1.0, 1.5}× | ~8 short runs | ~17 / 33.0 | 6 |
+| 7 | Tier A P2 (S/10M, w1.58a8) | "+P2 if budget allows" | not planned | 6 | 67.2 / 130.4 | 7 — journal |
 
-Core-restoration total (1–6): **~215 L4-h ≈ 327 CU** ≈ the gap to the uncut matrix
+Core-restoration total (1–6): **~215 L4-h ≈ 417 CU** ≈ the gap to the uncut matrix
 (~345 → ~175 L4-h as measured). The T5 code-caching fix will make quantized restores
 cheaper (~1.3× fp instead of 2.5–3.2×). **Concurrency does not pay: measured 2026-10-16,
 two concurrent S jobs ran ~2.9× slower than serial (116.1 s vs 40.6 s; 0.35×)** — the

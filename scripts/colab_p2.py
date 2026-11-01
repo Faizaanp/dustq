@@ -27,7 +27,7 @@ from pathlib import Path
 REPO_ZIP = "/content/dustq.zip"
 DRIVE_DATA = "/content/drive/MyDrive/dustq/data"
 DRIVE_RESULTS = "/content/drive/MyDrive/dustq/results"
-CU_BURN_RATE = "1.54"
+CU_BURN_RATE = "1.94"  # owner-observed 2026-10-31 (T1 measured 1.52; earlier planning assumed 1.7)
 
 def run_checked(cmd, **kwargs):
     """subprocess.run with captured output; on failure, print the tails before raising —

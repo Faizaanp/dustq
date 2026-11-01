@@ -23,7 +23,7 @@ from pathlib import Path
 REPO_ZIP = "/content/dustq.zip"
 DRIVE_DATA = "/content/drive/MyDrive/dustq/data"
 DRIVE_RESULTS = "/content/drive/MyDrive/dustq/results"
-CU_BURN_RATE = "1.54"  # measured 2026-10-16/17 from the Resources tab
+CU_BURN_RATE = "1.94"  # owner-observed 2026-10-31 (T1 measured 1.52; earlier planning assumed 1.7)
 # The 3 M-backprop rows hit FAILED_ATTEMPTS=2 while the zombie-OOM bug was live; with
 # retry enabled they re-run (and succeed) under the fixed code. Flip to False once the
 # L8d512_1M_fp_backprop rows show "done"/"skip (complete)" in runs.csv.

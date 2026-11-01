@@ -56,6 +56,9 @@ class RunConfig:
     momentum: float | None = None
     sigmas: dict | None = None          # None -> DUSTQ defaults (upstream literals)
     ste_mode: str = "identity"          # identity = BP-STE; smoothed = BP-SSTE (T5)
+    dust_forward: str = "tf32"          # Dust's forward arithmetic: tf32 | fp32 | fake
+                                         # (OQ-40: "fake" = same quantized function as BP-STE,
+                                         # ~1.4x faster; exact paths are artifacts/ablation)
     dtype: str = "auto"                 # auto = bf16 on CUDA, fp32 on CPU; or "fp32"
     data_dir: str = "data"              # where train_/val/test .pt live; "synthetic" for smoke
     output_dir: str = "results"

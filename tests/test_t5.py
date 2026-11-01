@@ -212,6 +212,22 @@ def test_exact_path_is_dust_only():
         assert not torch.allclose(q(x), ref), "DUST mode: stash must be USED"
 
 
+def test_dust_forward_config_plumbs(tmp_path):
+    """OQ-40 plumbing: dust_forward reaches QLinear._exact_mode on the Dust path; "fake"
+    must make the estimator share BP-STE's quantized forward (Plan v3.1 4.2)."""
+    from dustq.config import RunConfig
+    from dustq.train import Runner
+    for mode in ("tf32", "fake"):
+        cfg = RunConfig(task="smoke", size="tiny", tokens="1M", precision="w1.58a4",
+                        method="dust", seed=0, data_dir="synthetic", steps=2,
+                        eval_interval=2, dust_forward=mode, output_dir=str(tmp_path)).resolved()
+        r = Runner(cfg)
+        r._build()
+        modes = {m._exact_mode for m in r.model.modules()
+                 if isinstance(m, QLinear)}
+        assert modes == {mode}, f"dust_forward={mode} did not reach the QLinear modules"
+        r.model = None  # release the tiny model before the next iteration
+
 def test_smoke_bp_sste(tmp_path):
     from dustq.config import RunConfig
     from dustq.train import Runner

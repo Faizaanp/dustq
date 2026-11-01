@@ -104,7 +104,14 @@ class Runner:
                 qmodel.register_act_hooks(self.model, bits, scheme,
                                           allow_lowbit_absmax=(cfg.task == "smoke"),
                                           ste_mode=cfg.ste_mode)
-                qmodel.set_exact_path(self.model, enabled=True)  # DUST estimator path
+                # DUST estimator path. dust_forward (OQ-40): "fake" = the same quantized
+                # forward BP-STE runs (Plan 3.1 4.2 "same forward pass"); tf32/fp32 are
+                # the verified exact paths (correctness artifacts + optional ablation).
+                qmodel.set_exact_path(self.model, enabled=True,
+                                      mode=None if cfg.dust_forward == "fake" else cfg.dust_forward)
+                if cfg.dust_forward == "fake":
+                    from .quant import set_exact_mode
+                    set_exact_mode(self.model, "fake")
             self.optimizer = dust_make_optimizer(self.model, settings)
         else:
             self.model.requires_grad_(True)

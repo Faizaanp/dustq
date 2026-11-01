@@ -385,3 +385,26 @@ x low-bit quantized forward x from-scratch transformer pretraining x matched ZO-
 - **arXiv:2608.11693**: B300 has no native INT8 tensor core (relevant if hardware changes).
 - **arXiv:2610.07853 v3** (bf16-cast ternary export audit): new seeds and LR sweep; our fp32-latent + dtype-pinning defenses are aligned.
 - **Averaging Test** (Saanviiyer, Apical Dust notes): per-tensor bias vs N = 1...4096 (plateau height = bias) - proposed as T6 probe machinery alongside the fork's per-tensor cosine harness (`tests/check_quant.py`); externally corroborates our measured 2.5-3.2x re-quantization overhead ("naive quantize/dequantize plumbing dominates; fused kernels would recover it").
+
+### Watch 2026-11-01A additions (verdict WATCH)
+
+- **JacQuant** — arXiv:2605.25469 (Meta AI) [verified full text, 2026-11-01]: first-order paper
+  whose experimental charter states verbatim: "All methods share identical architectures,
+  training data, optimization settings, **and forward quantization**, and differ only in their
+  backward gradient rules." The fairness precedent for Plan v3.1 4.2's "same forward pass"
+  requirement — cite in the methods section when OQ-40 is decided. **Prior-art caution:** its
+  dithering/smoothed-target-gradient theory describes the same object as our BP-SSTE backward,
+  and the 2026-10-16 ZeroZAT App. G read already noted the same relationship. The smoothed-
+  quantizer backward is NOT novel; ours is its deployment as the matched smoothing control
+  against a backprop-free activation-perturbation estimator at matched budgets. Frame exactly
+  that in the paper.
+- **Informal corroboration** (footnote-level): the `quant-int8-relay` fork author on Noise PR
+  #20 (2026-10-21): "The adapted Relay worked but also slower and higher loss" — a naive
+  quantized forward on this codebase underperforms at this scale, matching our measured 3.4x
+  quantized cost and the slow exact path. Citable only as a public GitHub comment.
+- **Tripwire status:** all 51 Noise PRs re-scanned (0 quantization hits); fork frozen at
+  `fdaca52` with 0 forkers; rules unchanged since 2026-10-22; maintainers silent on issue #49.
+- **Dust citations: still none** across arXiv (3 shapes), Google Scholar (UI, reachable), and
+  the code-citation hit (2609.19107, which cites the repo, not the report). Semantic Scholar
+  blocked a 4th consecutive run (API 429 + UI WAF) — escalated in OPEN_QUESTIONS as a hard
+  pre-posting gate requiring a manual check.

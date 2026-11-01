@@ -108,6 +108,28 @@ class ProbeContext:
 
     # ---- gradient collection ----
 
+    def _ensure_hooks(self, ste_mode: str = "identity") -> None:
+        """Activation-quant hooks must exist for EVERY gradient path — including the Dust
+        paths (the estimator measures the QUANTIZED forward). Lazy registration here was a
+        silent-correctness bug: dust_grads ran with quantized weights but float
+        activations. Registered once per mode; the SMOKE task keeps absmax (no alpha table)."""
+        if getattr(self, "_hook_mode", None) == ste_mode and getattr(self, "_hook_handles", None):
+            return
+        for h in getattr(self, "_hook_handles", []):
+            h.remove()
+        from dustq import qmodel
+        if self.cfg.precision != "fp":
+            _, bits, scheme = qmodel.parse_precision(self.cfg.precision)
+            if self.cfg.task == "smoke" and scheme == "mse_alpha":
+                scheme = "absmax"
+            self._hook_handles = qmodel.register_act_hooks(
+                self.model, bits, scheme,
+                allow_lowbit_absmax=(self.cfg.task == "smoke"),
+                ste_mode=ste_mode, n_layer=self.model.config.n_layer)
+        else:
+            self._hook_handles = []
+        self._hook_mode = ste_mode
+
     def dust_grads(self, seed: int, population: int = 256, sigmas: dict | None = None,
                    apply_update: bool = False) -> dict:
         """A Dust gradient estimate at `population` (seed selects the noise stream)."""
@@ -115,6 +137,7 @@ class ProbeContext:
         from .dust_ext import DUSTQ
         model = self.model
         model.requires_grad_(True)
+        self._ensure_hooks("identity")
         settings = recipe(self.cfg.tokens, population, model.config.n_layer)
         est = DUSTQ(model, settings, seed=seed, sigmas=sigmas)
         opt = torch.optim.SGD(model.parameters(), lr=0.0 if not apply_update else 1e-3)
@@ -126,21 +149,9 @@ class ProbeContext:
 
     def bp_grads(self, ste_mode: str = "identity") -> dict:
         """A backprop gradient at the same weights (BP-STE or BP-SSTE)."""
-        from dustq import qmodel
-        from dustq.backprop_ext import train_step
+        from dustq.backprop_ext import train_step  # noqa: F401  (import kept for parity)
         # fresh hooks per backward mode so BOTH modes evaluate on the SAME weights
-        if getattr(self.model, "_probe_handles", None):
-            for h in self.model._probe_handles:
-                h.remove()
-        if self.cfg.precision != "fp":
-            _, bits, scheme = qmodel.parse_precision(self.cfg.precision)
-            task_smoke = self.cfg.task == "smoke"
-            if task_smoke and scheme == "mse_alpha":
-                scheme = "absmax"
-            handles = qmodel.register_act_hooks(self.model, bits, scheme,
-                                                allow_lowbit_absmax=task_smoke,
-                                                ste_mode=ste_mode)
-            self.model._probe_handles = handles
+        self._ensure_hooks(ste_mode)
         self.optimizer.zero_grad(set_to_none=True)
         with torch.autocast(self.model_device_str(), dtype=torch.bfloat16, enabled=self.device.type == "cuda"):
             loss = self.model(self.x, self.y)
@@ -154,6 +165,7 @@ class ProbeContext:
     # ---- losses ----
 
     def quantized_losses(self, x, y) -> torch.Tensor:
+        self._ensure_hooks(self._hook_mode or "identity")
         with torch.no_grad():
             with torch.autocast(self.model_device_str(), dtype=torch.bfloat16, enabled=self.device.type == "cuda"):
                 return self.model(x, y, loss_reduction="none")
@@ -382,39 +394,51 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, help="YAML of the checkpoint run (PCKPT)")
     parser.add_argument("--out", default="results/probes")
+    parser.add_argument("--probes", default="3,2,5,4",
+                        help="subset of {1,2,3,4,5}; probe 1 is computed once for any that need it")
     args = parser.parse_args()
     Path(args.out).mkdir(parents=True, exist_ok=True)
     cfg = load_config(args.config)
     ctx = ProbeContext(cfg)
+    which = {int(p) for p in args.probes.split(",")}
     report = {}
 
-    print("probe 1/2: reference (K=16384, two halves) + cosine ladders", flush=True)
-    _, ref, reliability = probe_reference(ctx)
-    report["reliability"] = reliability
-    ladders = probe_cosine_ladders(ctx, reference=ref)
-    report["cosine_ladders"] = {str(k): v for k, v in ladders.items()}
-    print("reliability:", reliability, "| ladders:", json.dumps(report["cosine_ladders"], indent=1))
+    ref, reliability = None, 1.0
+    if which & {1, 2, 3, 5}:
+        _, ref, reliability = probe_reference(ctx)
+        report["reliability"] = reliability
+        print(f"probe 1: reference K=16384 halves -> reliability {reliability:.4f}", flush=True)
 
-    print("probe 3: STE/SSTE bias", flush=True)
-    bias = probe_ste_bias(ctx, reference=ref)
-    report["ste_bias"] = bias
-    print(json.dumps(bias, indent=1))
+    if 2 in which:
+        print("probe 2: cosine ladders", flush=True)
+        ladders = probe_cosine_ladders(ctx, reference=ref)
+        report["cosine_ladders"] = {str(k): v for k, v in ladders.items()}
+        print(json.dumps(report["cosine_ladders"], indent=1))
 
-    print("probe 5: sigma-Delta sweep", flush=True)
-    sweep = probe_sigma_delta(ctx, ref)
-    report["sigma_delta"] = {f"{k[0]:.3f}x@{k[1]}": v["cos"] for k, v in sweep.items()}
-    print(json.dumps(report["sigma_delta"], indent=1))
+    if 3 in which:
+        print("probe 3: STE/SSTE bias", flush=True)
+        bias = probe_ste_bias(ctx, reference=ref)
+        report["ste_bias"] = bias
+        print(json.dumps(bias, indent=1))
 
-    print("probe 4: directional descent", flush=True)
-    cand = {
-        "STE": ctx.bp_grads("identity"),
-        "SSTE": ctx.bp_grads("smoothed"),
-        "Dust256": ctx.dust_grads(seed=0, population=256),
-        "Dust1k": ctx.dust_grads(seed=0, population=1024),
-    }
-    dd = probe_directional_descent(ctx, cand)
-    report["directional_descent"] = {k: {"train": v["train"], "val": v["val"]} for k, v in dd.items()}
-    print(json.dumps(report["directional_descent"], indent=1))
+    if 5 in which:
+        print("probe 5: sigma-Delta sweep", flush=True)
+        sweep = probe_sigma_delta(ctx, ref)
+        report["sigma_delta"] = {f"{k[0]:.3f}x@{k[1]}": v["cos"] for k, v in sweep.items()}
+        print(json.dumps(report["sigma_delta"], indent=1))
+
+    if 4 in which:
+        print("probe 4: directional descent", flush=True)
+        cand = {
+            "STE": ctx.bp_grads("identity"),
+            "SSTE": ctx.bp_grads("smoothed"),
+            "Dust256": ctx.dust_grads(seed=0, population=256),
+            "Dust1k": ctx.dust_grads(seed=0, population=1024),
+        }
+        dd = probe_directional_descent(ctx, cand)
+        report["directional_descent"] = {k: {"train": v["train"], "val": v["val"]}
+                                         for k, v in dd.items()}
+        print(json.dumps(report["directional_descent"], indent=1))
 
     (Path(args.out) / f"{cfg.run_id}_probes.json").write_text(json.dumps(report, indent=1))
     print("wrote", Path(args.out) / f"{cfg.run_id}_probes.json")

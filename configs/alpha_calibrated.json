@@ -1,0 +1,31 @@
+{
+  "provenance": {
+    "checkpoint": "/content/drive/MyDrive/dustq/results/L4d256_1M_fp_backprop_K0_s0/best.pt",
+    "data": "data/train_1M.pt (first 8 batches)",
+    "grid": "two-stage log-alpha in [-2.0, 2.2] (0.01x..158x mean|x|), 32pt coarse + 21pt refine",
+    "sites": "signed: c_q/c_k/c_v + o@l + c_fc inputs; unsigned: mlp.c_proj input",
+    "rule": "scale = alpha_b * mean|x| per token; argmin MSE over the grid",
+    "date": "2026-11-01, Colab L4, S/1M backprop fp checkpoint"
+  },
+  "alpha": {
+    "a8s": 0.047579443140094116,
+    "a8u": 0.6143093093934704,
+    "a4s": 0.5255876614446687,
+    "a4u": 3.311311214825912,
+    "a2s": 1.6157981136210016,
+    "a2u": 5.454741742859909
+  },
+  "detail": {
+    "a8s": {"alpha": 0.047579443140094116, "mse": 7.701076538069174e-05, "at_grid_bounds": false},
+    "a8u": {"alpha": 0.6143093093934704, "mse": 0.0047410656698048115, "at_grid_bounds": false},
+    "a4s": {"alpha": 0.5255876614446687, "mse": 0.010723244398832321, "at_grid_bounds": false},
+    "a4u": {"alpha": 3.311311214825912, "mse": 0.17706134915351868, "at_grid_bounds": false},
+    "a2s": {"alpha": 1.6157981136210016, "mse": 0.1207442581653595, "at_grid_bounds": false},
+    "a2u": {"alpha": 5.454741742859909, "mse": 0.5617074966430664, "at_grid_bounds": false}
+  },
+  "notes": [
+    "A8 entries are computed but unused: parse_precision keeps absmax for 8-bit activations (Plan v3.1 4.2).",
+    "a8s=0.048 is MSE-driven aggressive clipping on a heavy-tailed distribution; unused, recorded for provenance.",
+    "Practical A4/A2 values moved little from the first (boundary-pinned) calibration: the grid fix mattered for a4u (3.20 -> 3.31)."
+  ]
+}

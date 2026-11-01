@@ -43,4 +43,17 @@ stay at the PRE-T5 (fake-quant) numbers until that table lands.
 - The exactness property (fp64 reference within 1e-7, integer code path bit-exact).
 - The Dust-only scope of the exact path (BP-STE/BP-SSTE keep fake-quant for train/eval
   self-consistency, deliberately).
-- Any claim in the paper: Dust and BP-SSTE see the same quantized forward either way.
+
+## Follow-up 2026-11-01: TF32 result and the forward-consistency decision
+
+Second measurement with the TF32 path (same cell order): S/K256 34.496, S/K1024 147.006,
+M/K256 139.053, M/K1024 534.258 — a 3-7% gain over the fp32 exact path, so TF32 was not
+the bottleneck; the exact path remains ~1.4x the pre-T5 fake-quant speed.
+
+The real finding is a correctness issue v3.1 4.2 already anticipated, and it CORRECTS the
+last bullet of the previous section (which is retained above with this note): Dust would
+run an integer-exact forward while BP-STE/BP-SSTE run bf16 fake-quant under autocast — two
+DIFFERENT quantized functions, contradicting the plan's requirement that all methods share
+one forward pass. Recommendation (owner decision, OPEN_QUESTIONS 40): run Dust in
+`--exact-mode fake` (same function as BP-STE, ~1.4x faster) and keep the TF32/fp32 exact
+paths as verified correctness artifacts and an optional ablation.

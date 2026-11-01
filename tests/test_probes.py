@@ -53,6 +53,11 @@ def test_reference_and_ladders(ctx):
     assert -1.0 <= rel <= 1.0
     lad = probe_cosine_ladders(ctx, populations=(256, 1024), reference=ref)
     assert set(lad) == {256, 1024}
+    # reporting precedent (arXiv:2609.19589): raw and disattenuated both present
+    for population, groups in lad.items():
+        for name, val in groups.items():
+            assert set(val) == {"raw", "disattenuated"}
+            assert val["disattenuated"] >= val["raw"] - 1e-6
 
 
 def test_ste_bias_probe(ctx):

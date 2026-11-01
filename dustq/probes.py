@@ -221,8 +221,10 @@ def probe_per_tensor_cosine(ctx, reference, populations=(256, 1024)) -> dict:
 
 
 def probe_cosine_ladders(ctx, populations=(256, 1024, 4096), reference=None) -> dict:
-    """Probe 2: cos(Dust-K, ref) per layer type vs K, disattenuated by the halves'
-    reliability. Returns {population: {group: cos}} and the same raw (un-corrected)."""
+    """Probe 2: cos(Dust-K, ref) per layer type vs K. Reports BOTH the raw cosine and the
+    disattenuated one (raw / halves-reliability) per the reporting precedent
+    arXiv:2609.19589 (WATCH 2026-11-01B): state what you divided out. Returns
+    {population: {group: {"raw": c, "disattenuated": min(1, c/reliability)}}}."""
     if reference is None:
         _, reference, reliability = probe_reference(ctx)
     else:
@@ -231,7 +233,8 @@ def probe_cosine_ladders(ctx, populations=(256, 1024, 4096), reference=None) -> 
     for k in populations:
         g = ctx.dust_grads(seed=0, population=k)
         per_group = cosine_by_group(g, reference)
-        out[k] = {gname: min(1.0, c / reliability) for gname, c in per_group.items()}
+        out[k] = {gname: {"raw": c, "disattenuated": min(1.0, c / reliability)}
+                  for gname, c in per_group.items()}
     return out
 
 

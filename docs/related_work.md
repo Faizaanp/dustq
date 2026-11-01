@@ -408,3 +408,32 @@ x low-bit quantized forward x from-scratch transformer pretraining x matched ZO-
   the code-citation hit (2609.19107, which cites the repo, not the report). Semantic Scholar
   blocked a 4th consecutive run (API 429 + UI WAF) — escalated in OPEN_QUESTIONS as a hard
   pre-posting gate requiring a manual check.
+
+### Watch 2026-11-01B additions (verdict WATCH; reference gaps predating the window)
+
+- **arXiv:2306.11987** (Xi et al., NeurIPS 2023): INT4 from-scratch training; origin of the
+  Hadamard activation-transform trick — direct background for low-bit activation training.
+- **arXiv:2407.09527** (BitNet b1.58 Reloaded): ternary training at 100K-48M parameters — the
+  closest-in-scale prior art for our 7.3M/37.7M ternary runs.
+- **arXiv:2610.22621** (SigmaDelta-Sampler): the closest published analog to our sigma-Delta
+  probe — a sampler-level treatment of the noise-vs-quantization-grid interaction; distinguish
+  ours (estimator reward interaction in a training loop) from theirs in related work.
+- **arXiv:2610.09202** (CanonQ): exact STE Jacobian analysis plus frozen Gaussian-reference
+  codebooks — a second smoothed-gradient neighbor for the BP-SSTE caveat; same framing rule.
+- **arXiv:2606.09012**: STE bias is ADAPTIVE (it steers quantized iterates back into the
+  low-loss basin) — a claim-discipline nuance for section 10: our claim is not "STE is always
+  harmful" but "we test whether the true-quantized-loss estimator helps at matched budget, and
+  isolate its advantage from smoothing via the BP-SSTE control". One bullet added below.
+- **Resolved identifiers** (v1's open flag): BitNet b1.58 = arXiv:2402.17764; BitNet a4.8 =
+  arXiv:2411.04965; BitNet v2 = arXiv:2504.18415. HQZO Crossref-verified in full (29-reference
+  list; 0 citations). Zoop remains bot-walled [unverified; do not retry].
+- **Seed-divergence anchor for the G0 writeup**: arXiv:2025.emnlp-main.1675 (Fehlauer,
+  Mahowald, Pimentel): smaller language models never actually reconverge across seeds — this
+  directly supports our K=1024 seed-divergence characterization and justifies >=3 seeds per
+  Tier-B cell as a floor, not a preference.
+- **L4-specific perf theory for the int-code path** (leads, not adopted): arXiv:2609.00363 /
+  2608.13756 show INT32 accumulation is exact and cross-kernel divergence is epilogue-only
+  (<=1 bf16 spacing), with power-of-two scales achieving bitwise agreement; arXiv:2610.17531
+  reports up to 4x int8 over fp16 on L4 with FUSED kernels; arXiv:2609.09208 warns shift-
+  accumulate loses to native INT8 MAC on our GPU class. Consistent with our measurement that
+  the unfused exact path trails fake-quant — the fast path requires fusion, not dtype choice.

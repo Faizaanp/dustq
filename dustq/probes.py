@@ -79,9 +79,14 @@ def cosine_by_group(grads_a: dict, grads_b: dict) -> dict[str, float]:
 
 @dataclass
 class ProbeContext:
-    """Everything a probe run needs: the quantized model, its checkpoint, the batch."""
+    """Everything a probe run needs: the quantized model, its checkpoint, the batch.
+
+    `batch` / `heldout` override the drive-loaded batches — for synthetic fixtures and CPU
+    tests (the checkpoint dir is real; the data files may not exist)."""
     cfg: RunConfig
     device: torch.device = field(init=False)
+    batch: tuple | None = None
+    heldout: tuple | None = None
 
     def __post_init__(self):
         from dustq import qmodel
@@ -90,21 +95,33 @@ class ProbeContext:
                                    else "cpu")
         from .train import load_best
         from dustq import qmodel as _qm  # noqa
-        ckpt = self.cfg.output_dir / self.cfg.run_id / "best.pt"
+        ckpt = Path(self.cfg.output_dir) / self.cfg.run_id / "best.pt"
         best, state = load_best(ckpt, self.device)
         # BP path: the same quantized model the checkpoint was trained under.
         self.model = build_model(self.cfg.model_kwargs(), self.cfg.precision,
                                  self.device, seed=self.cfg.seed).requires_grad_(True)
         from dustq.backprop_ext import make_bp_optimizer
         self.model.load_state_dict(state)  # latents are fp32; state is on-device
+        # OQ-40: the Dust probe path must share the backprop probes' quantized forward
+        # (Plan v3.1 4.2, one function per comparison). cfg.dust_forward: "fake" (the
+        # plan-consistent default and 1.4x faster for the estimator) or "tf32"/"fp32"
+        # (exact-path ablation). Without this, probe cosines would compare gradients
+        # from two slightly different quantized functions.
+        qmodel.set_exact_path(self.model, True, mode=self.cfg.dust_forward)
         self.optimizer = make_bp_optimizer(self.model, 1e-3, 0.9)
         self.best_val = best
-        rows = load_sequences(Path(self.cfg.data_dir) / "train_1M.pt", 8)
-        self.x = rows[:, :-1].contiguous().to(self.device)
-        self.y = rows[:, 1:].contiguous().to(self.device)
-        val = load_sequences(Path(self.cfg.data_dir) / "val.pt", 8)
-        self.vx = val[:, :-1].contiguous().to(self.device)
-        self.vy = val[:, 1:].contiguous().to(self.device)
+        if self.batch is not None:
+            self.x, self.y = self.batch
+        else:
+            rows = load_sequences(Path(self.cfg.data_dir) / "train_1M.pt", 8)
+            self.x = rows[:, :-1].contiguous().to(self.device)
+            self.y = rows[:, 1:].contiguous().to(self.device)
+        if self.heldout is not None:
+            self.vx, self.vy = self.heldout
+        else:
+            val = load_sequences(Path(self.cfg.data_dir) / "val.pt", 8)
+            self.vx = val[:, :-1].contiguous().to(self.device)
+            self.vy = val[:, 1:].contiguous().to(self.device)
 
     # ---- gradient collection ----
 
@@ -229,6 +246,19 @@ def probe_per_tensor_cosine(ctx, reference, populations=(256, 1024)) -> dict:
         g = ctx.dust_grads(seed=0, population=k)
         out[k] = {name: cosine(g[name], reference[name])
                   for name in reference if name in g}
+    return out
+
+
+def probe_seed_noise(ctx, seeds=(0, 1), populations=(256, 1024)) -> dict:
+    """Probe 0 (seed-pair noise floor): per-group cosine between Dust gradients at two
+    seeds on the SAME checkpoint and batch. Benchmarks any "within seed noise" claim: the
+    G1 dtype verdict was a mean cosine of +0.9910 (fp32 vs bf16); if seed-vs-seed is at or
+    below that, the two dtypes are indistinguishable at this K."""
+    out = {}
+    for k in populations:
+        g0 = ctx.dust_grads(seed=seeds[0], population=k)
+        g1 = ctx.dust_grads(seed=seeds[-1], population=k)
+        out[str(k)] = cosine_by_group(g0, g1)
     return out
 
 
@@ -395,13 +425,27 @@ def main():
     parser.add_argument("--config", required=True, help="YAML of the checkpoint run (PCKPT)")
     parser.add_argument("--out", default="results/probes")
     parser.add_argument("--probes", default="3,2,5,4",
-                        help="subset of {1,2,3,4,5}; probe 1 is computed once for any that need it")
+                        help="subset of {0,1,2,3,4,5}; probe 1 is computed once for any that need it")
+    parser.add_argument("--dust-forward", default=None, choices=["tf32", "fp32", "fake"],
+                        help="override the config's dust_forward (OQ-40) for this probe run")
     args = parser.parse_args()
     Path(args.out).mkdir(parents=True, exist_ok=True)
     cfg = load_config(args.config)
+    if args.dust_forward:
+        cfg.dust_forward = args.dust_forward
     ctx = ProbeContext(cfg)
     which = {int(p) for p in args.probes.split(",")}
     report = {}
+
+    if 0 in which:
+        print("probe 0: seed-pair noise floor", flush=True)
+        noise = probe_seed_noise(ctx)
+        report["seed_noise"] = noise
+        print(json.dumps(noise, indent=1))
+        flat = [v for groups in noise.values() for v in groups.values()]
+        if flat:
+            print(f"seed-noise floor: mean {sum(flat) / len(flat):.4f}, "
+                  f"min {min(flat):.4f} — compare with the G1 bf16-vs-fp32 mean (+0.9910)", flush=True)
 
     ref, reliability = None, 1.0
     if which & {1, 2, 3, 5}:

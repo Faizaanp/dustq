@@ -10,8 +10,8 @@ import torch
 
 from dustq.config import RunConfig
 from dustq.probes import (ProbeContext, cosine_by_group, fit_cos_law, probe_cosine_ladders,
-                          probe_directional_descent, probe_reference, probe_sigma_delta,
-                          probe_ste_bias)
+                          probe_directional_descent, probe_reference, probe_seed_noise,
+                          probe_sigma_delta, probe_ste_bias)
 
 
 @pytest.fixture(scope="module")
@@ -35,6 +35,8 @@ def ctx(tmp_path_factory):
     ctx_obj.optimizer = make_bp_optimizer(ctx_obj.model, 1e-3, 0.9)
     ctx_obj.x, ctx_obj.y = tiny_batch(torch.device("cpu"), sequences=8, length=128)
     ctx_obj.vx, ctx_obj.vy = tiny_batch(torch.device("cpu"), seed=99, sequences=8, length=128)
+    ctx_obj.batch = (ctx_obj.x, ctx_obj.y)
+    ctx_obj.heldout = (ctx_obj.vx, ctx_obj.vy)
     ctx_obj.best_val = 0.0
     yield ctx_obj
 
@@ -85,3 +87,23 @@ def test_cos_law_fit_shape():
     assert fits["MLP out"] is not None and fits["MLP out"]["c_max"] > 0.8
     assert fits["Head"] is None, "fewer than 3 K-points must return None"
 
+
+
+def test_seed_noise_probe(ctx):
+    """Probe 0: seed-pair cosines on the same checkpoint/batch are the floor any
+    within-seed-noise claim (incl. G1's +0.9910) must be benchmarked against."""
+    noise = probe_seed_noise(ctx, populations=(256,))
+    assert set(noise) == {"256"}
+    for groups in noise.values():
+        assert groups and all(-1.001 <= v <= 1.001 for v in groups.values())
+
+
+def test_probe_context_sets_dust_forward(ctx):
+    """OQ-40 in the probes: ProbeContext plumbs cfg.dust_forward into every QLinear so
+    Dust and backprop probes share one quantized forward (Plan v3.1 4.2)."""
+    obj = ProbeContext(ctx.cfg, batch=ctx.batch, heldout=ctx.heldout)
+    assert obj.x.shape == ctx.x.shape and torch.equal(obj.x, ctx.x)
+    modes = {m._exact_mode for m in obj.model.modules() if hasattr(m, "_exact_mode")}
+    assert modes == {ctx.cfg.dust_forward}, f"dust_forward did not reach the QLinear modules: {modes}"
+    obj._ensure_hooks("identity")
+    assert obj._hook_handles, "act hooks must register for a quantized probe model"

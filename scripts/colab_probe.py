@@ -51,6 +51,35 @@ if not alpha.exists():
                     f"{DRIVE_RESULTS}/L4d256_1M_fp_backprop_K0_s0/best.pt",
                     "--batches", "8"], check=True)
 
+# ---- 0b. G1 loss confirmation (the open half of gate G1) ----
+print("\n=== G1 loss rows (paste these back) ===", flush=True)
+import csv
+
+runs_csv = Path(DRIVE_RESULTS) / "runs.csv"
+if runs_csv.is_file():
+    ids = [r for r in csv.DictReader(runs_csv.open())]
+    wanted = ("L8d512_1M_fp_dust_K256_s0_fp32", "L8d512_1M_w1p58a4_dust_K256_s0",
+              "L8d512_1M_w1p58a4_dust_K256_s0_fp32")
+    hits = [r for r in ids if r["run_id"] in wanted]
+    for r in hits:
+        print(f"{r['run_id']}: val_best={r['val_loss_best']} test={r['test_loss_at_best_val']} "
+              f"steps={r['steps']} status={r['status']}")
+    if len(hits) < len(wanted):
+        print(f"(only {len(hits)} of {len(set(wanted))} G1 rows found in runs.csv)")
+    base = [r for r in ids if r["run_id"] in
+            ("L8d512_1M_fp_dust_K256_s0", "L8d512_1M_fp_dust_K256_s1",
+             "L8d512_1M_fp_dust_K256_s2") and r["status"] == "completed"]
+    if base:
+        print("bf16 K256 base (Tier R, for comparison):",
+              [r["test_loss_at_best_val"] for r in base])
+else:
+    print("runs.csv not found on Drive")
+
+# OQ-40 decision: the Dust probe gradients share the backprop probes' forward (Plan v3.1
+# 4.2). "fake" is the plan-consistent default and ~1.4x faster for the estimator; "tf32"
+# keeps the verified exact path for the ablation.
+DUST_FORWARD = "fake"
+
 # ---- 1. S probes per precision (probe 3 first on P3 — the H2 gate) ----
 S_PCKPTS = [
     "L4d256_1M_w1p58a4_backprop_K0_s0",   # P3 primary: STE-bias gate first
@@ -59,10 +88,10 @@ S_PCKPTS = [
     "L4d256_1M_w8a8_backprop_K0_s0",     # P1
 ]
 for run_id in S_PCKPTS:
-    which = "3,2,5" if "w1p58a4" in run_id else "3,2"
-    print(f"\n=== S probes {run_id} (probes {which}) ===", flush=True)
+    which = "3,2,5,0" if "w1p58a4" in run_id else "3,2"
+    print(f"\n=== S probes {run_id} (probes {which}, forward={DUST_FORWARD}) ===", flush=True)
     subprocess.run([PY, "-m", "dustq.probes", "--config", f"configs/{run_id}.yaml",
-                    "--probes", which], check=True)
+                    "--probes", which, "--dust-forward", DUST_FORWARD], check=True)
 
 # ---- 2. directional descent on S at P3 (cheap, method-neutral arbiter) ----
 print("\n=== S directional descent (P3) ===", flush=True)
@@ -75,7 +104,8 @@ M_P3 = "L8d512_1M_w1p58a4_dust_K256_s0"   # reuse a trained M checkpoint for the
 if os.environ.get("M_SPOT", "1") == "1":
     print("\n=== M spot-check (ladders + sweep) ===", flush=True)
     subprocess.run([PY, "-m", "dustq.probes", "--config", f"configs/{M_P3}.yaml",
-                    "--probes", "2,5"], check=True)
+                    "--probes", "2,5", "--dust-forward", DUST_FORWARD], check=True)
 
 print(f"\nprobe session complete: {(time.monotonic() - T0) / 3600:.2f} h "
-      "— copy results/probes/*.json back")
+      "— copy results/probes/*.json back, plus the G1 loss rows and the "
+      "seed-noise floor printed above")

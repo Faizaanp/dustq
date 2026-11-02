@@ -23,6 +23,15 @@ DRIVE_RESULTS = "/content/drive/MyDrive/dustq/results"
 PY = sys.executable
 T0 = time.monotonic()
 
+# the checkpoints the probe session reads (must exist on Drive; preflight asserts it)
+S_PCKPTS = [
+    "L4d256_1M_w1p58a4_backprop_K0_s0",   # P3 primary
+    "L4d256_1M_fp_backprop_K0_s0",       # P0 reference
+    "L4d256_1M_w1p58a8_backprop_K0_s0",  # P2
+    "L4d256_1M_w8a8_backprop_K0_s0",     # P1
+]
+M_P3 = "L8d512_1M_w1p58a4_dust_K256_s0"   # reuse a trained M checkpoint for the layers
+
 # ---- 0. environment ----
 import torch
 
@@ -43,6 +52,25 @@ from google.colab import drive
 drive.mount("/content/drive")
 if not Path("data").exists():
     os.symlink(DRIVE_DATA, "data")
+# results/ is gitignored, so the fresh zip has none: without this link ProbeContext opens
+# results/<run_id>/best.pt and every probe run dies with FileNotFoundError before its first
+# gradient (this killed the 2026-11-02 session; the error was swallowed by subprocess.run).
+if not Path("results").exists():
+    os.symlink(DRIVE_RESULTS, "results")
+
+def run_checked(cmd, **kwargs):
+    """Capture output; on failure print the tails BEFORE exiting — never let an inner
+    crash's message vanish (the Tier-R truncated-note lesson, applied here too late)."""
+    result = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
+    if result.returncode != 0:
+        print("COMMAND FAILED:", " ".join(cmd), flush=True)
+        print("--- stdout tail ---\n" + result.stdout[-2500:], flush=True)
+        print("--- stderr tail ---\n" + result.stderr[-4000:], flush=True)
+        raise SystemExit(f"exit {result.returncode}; see tails above")
+    if result.stdout.strip():
+        print(result.stdout[-1500:], flush=True)
+    return result
+
 
 alpha = Path("configs/alpha_calibrated.json")
 if not alpha.exists():
@@ -50,6 +78,22 @@ if not alpha.exists():
     subprocess.run([PY, "scripts/calibrate_alpha.py", "--checkpoint",
                     f"{DRIVE_RESULTS}/L4d256_1M_fp_backprop_K0_s0/best.pt",
                     "--batches", "8"], check=True)
+
+# ---- 0a. fail fast on anything that would abort the session at its first probe ----
+print("\n=== 0a. preflight (data, checkpoints, alpha table) ===", flush=True)
+for need, label in ((Path("data/train_1M.pt"), "data/train_1M.pt"),
+                    (Path("data/val.pt"), "data/val.pt"),
+                    (Path("configs/alpha_calibrated.json"), "alpha_calibrated.json")):
+    if not need.is_file():
+        print(f"MISSING {label} — the probe session cannot start", flush=True)
+        raise SystemExit(f"missing {label}")
+for run_id in S_PCKPTS + [M_P3]:
+    ckpt = Path("results") / run_id / "best.pt"
+    print(f"{'ok ' if ckpt.is_file() else 'MISSING'} {ckpt}", flush=True)
+missing_p = [r for r in S_PCKPTS + [M_P3] if not (Path("results") / r / "best.pt").is_file()]
+if missing_p:
+    raise SystemExit(f"checkpoints missing on Drive: {missing_p}")
+print("preflight passed", flush=True)
 
 # ---- 0b. G1 loss confirmation (the open half of gate G1) ----
 print("\n=== G1 loss rows (paste these back) ===", flush=True)
@@ -81,30 +125,23 @@ else:
 DUST_FORWARD = "fake"
 
 # ---- 1. S probes per precision (probe 3 first on P3 — the H2 gate) ----
-S_PCKPTS = [
-    "L4d256_1M_w1p58a4_backprop_K0_s0",   # P3 primary: STE-bias gate first
-    "L4d256_1M_fp_backprop_K0_s0",       # P0 reference
-    "L4d256_1M_w1p58a8_backprop_K0_s0",  # P2
-    "L4d256_1M_w8a8_backprop_K0_s0",     # P1
-]
 for run_id in S_PCKPTS:
     which = "3,2,5,0" if "w1p58a4" in run_id else "3,2"
     print(f"\n=== S probes {run_id} (probes {which}, forward={DUST_FORWARD}) ===", flush=True)
-    subprocess.run([PY, "-m", "dustq.probes", "--config", f"configs/{run_id}.yaml",
-                    "--probes", which, "--dust-forward", DUST_FORWARD], check=True)
+    run_checked([PY, "-m", "dustq.probes", "--config", f"configs/{run_id}.yaml",
+                 "--probes", which, "--dust-forward", DUST_FORWARD])
 
 # ---- 2. directional descent on S at P3 (cheap, method-neutral arbiter) ----
 print("\n=== S directional descent (P3) ===", flush=True)
-subprocess.run([PY, "-m", "dustq.probes", "--config",
-                "configs/L4d256_1M_w1p58a4_backprop_K0_s0.yaml", "--probes", "4"],
-               check=True)
+run_checked([PY, "-m", "dustq.probes", "--config",
+             "configs/L4d256_1M_w1p58a4_backprop_K0_s0.yaml", "--probes", "4",
+             "--dust-forward", DUST_FORWARD])
 
 # ---- 3. M spot-check at P3 (ladders only, unless the budget is comfortable) ----
-M_P3 = "L8d512_1M_w1p58a4_dust_K256_s0"   # reuse a trained M checkpoint for the layers
 if os.environ.get("M_SPOT", "1") == "1":
     print("\n=== M spot-check (ladders + sweep) ===", flush=True)
-    subprocess.run([PY, "-m", "dustq.probes", "--config", f"configs/{M_P3}.yaml",
-                    "--probes", "2,5", "--dust-forward", DUST_FORWARD], check=True)
+    run_checked([PY, "-m", "dustq.probes", "--config", f"configs/{M_P3}.yaml",
+                 "--probes", "2,5", "--dust-forward", DUST_FORWARD])
 
 print(f"\nprobe session complete: {(time.monotonic() - T0) / 3600:.2f} h "
       "— copy results/probes/*.json back, plus the G1 loss rows and the "

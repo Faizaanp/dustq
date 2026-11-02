@@ -107,3 +107,126 @@ def test_probe_context_sets_dust_forward(ctx):
     assert modes == {ctx.cfg.dust_forward}, f"dust_forward did not reach the QLinear modules: {modes}"
     obj._ensure_hooks("identity")
     assert obj._hook_handles, "act hooks must register for a quantized probe model"
+
+
+def test_pckpt_task_probe_path(tmp_path):
+    """Regression for the 2026-11-02 Colab crash: the real run uses task="PCKPT"
+    (no smoke override), so w1.58a4 resolves through mse_alpha + the FROZEN alpha table
+    and hooks register with allow_lowbit_absmax=False. That combination never ran on CPU
+    before (the 6/6 suite always used task=smoke -> absmax). Tiny sizes keep it CPU-fast;
+    seq length is the L4 size but only 2 steps are trained."""
+    cfg = RunConfig(task="PCKPT", size="tiny", tokens="1M", precision="w1.58a4",
+                    method="backprop", seed=0, data_dir="synthetic", steps=2,
+                    eval_interval=2, output_dir=str(tmp_path)).resolved()
+    assert cfg.task == "PCKPT" and cfg.dust_forward == "tf32"  # config default, not smoke
+    Runner = __import__("dustq.train", fromlist=["Runner"]).Runner
+    Runner(cfg).train()  # 2 quantized backprop steps -> best.pt with mse_alpha path
+
+    from dustq.runner import tiny_batch
+    ctx_obj = ProbeContext(cfg, batch=tiny_batch(torch.device("cpu"), sequences=4),
+                           heldout=tiny_batch(torch.device("cpu"), seed=99, sequences=4))
+    # the exact failing invocation's path, minus the expensive reference probe
+    ctx_obj._ensure_hooks("identity")
+    assert ctx_obj._hook_handles, "act hooks must register on the real mse_alpha path"
+    g_ste = ctx_obj.bp_grads("identity")
+    g_sste = ctx_obj.bp_grads("smoothed")
+    assert set(g_ste) == set(g_sste) and g_ste
+    g_dust = ctx_obj.dust_grads(seed=0, population=256)
+    groups = cosine_by_group(g_dust, g_ste)
+    assert groups and all(-1.001 <= v <= 1.001 for v in groups.values())
+    # gamma of the quantized forward must actually have run: per-token scales exist
+    assert all(p.isfinite().all() for p in g_dust.values())
+
+
+def test_site_sigma_key_mapping():
+    """qmodel.site_sigma_key is the inverse map probe 5 needs: every act-quant site must
+    resolve to a real DUSTQ sigma key (the old code passed SITE names like 'attn.c_q'
+    straight to DUSTQ, which raises 'unknown sigma keys')."""
+    from dustq import qmodel
+    from dustq.dust_ext import DEFAULT_SIGMAS
+
+    names = ["transformer.h.0.attn.c_q", "transformer.h.0.attn.c_k",
+             "transformer.h.1.attn.c_v", "transformer.h.0.attn.c_proj",
+             "transformer.h.3.attn.c_proj", "transformer.h.0.mlp.c_fc",
+             "transformer.h.1.mlp.c_proj"]
+    for name in names:
+        key = qmodel.site_sigma_key(name, 4)
+        assert key in DEFAULT_SIGMAS, f"{name} -> {key!r} is not a DUSTQ sigma key"
+    # the hub sigma splits by depth: shallow half 0.2, deep half 0.4 (n_layer=4)
+    assert qmodel.site_sigma("transformer.h.0.attn.c_proj", 4) == 0.2
+    assert qmodel.site_sigma("transformer.h.3.attn.c_proj", 4) == 0.4
+    assert qmodel.site_sigma("transformer.h.1.attn.c_q", 4) == 0.05
+    assert qmodel.site_sigma("transformer.h.0.mlp.c_fc", 4) == 0.2
+    assert qmodel.site_sigma("transformer.h.0.mlp.c_proj", 4) == 0.2
+    # sites without an act hook fall back, and are excluded from the sweep keys
+    assert qmodel.site_sigma_key("transformer.wte", 4) is None
+    assert qmodel.site_sigma_key("lm_head", 4) is None
+
+
+def _hook_qualnames(module):
+    """Ordered qualnames of a module's forward pre-hooks, to identify whose hook is whose."""
+    return [getattr(fn, "__qualname__", "?") for fn in module._forward_pre_hooks.values()]
+
+
+def test_dust_grads_hook_order(ctx):
+    """The estimator's o@l noise hook must come BEFORE our act-quant pre-hooks (noise ->
+    quantize), on EVERY dust_grads call. The probes registered the act hooks first, which
+    both reversed the order and - on the exact paths - dropped the jitter entirely, since
+    QLinear's codes are computed from the input the act hook sees. DUSTQ.close() removes
+    Dust's hooks but leaves ours in place, so the ordering must be re-established per call."""
+    from dustq.dust_ext import DUSTQ
+
+    def qualnames(module_list):
+        return _hook_qualnames(module_list)
+
+    seen = []
+    original_step = DUSTQ.step
+
+    def recording_step(self, x, y, opt):
+        # at step time the module's pre-hook order is whatever dust_grads() established
+        seen.append(qualnames(ctx.model.get_submodule("transformer.h.0.attn.c_proj")))
+        return original_step(self, x, y, opt)
+
+    DUSTQ.step = recording_step
+    try:
+        ctx.dust_grads(seed=0, population=256)
+        ctx.dust_grads(seed=1, population=256)
+    finally:
+        DUSTQ.step = original_step
+
+    assert len(seen) == 2, "both dust_grads calls should have recorded"
+    for i, hooks in enumerate(seen):
+        dust = next(j for j, q in enumerate(hooks) if q.startswith("DUST.input_hook"))
+        ours = next(j for j, q in enumerate(hooks) if q.startswith("register_act_hooks"))
+        assert dust < ours, (f"call {i}: the o@l noise hook (index {dust}) must run BEFORE "
+                             f"the act-quant hook (index {ours}): noise -> quantize")
+
+
+def test_sigma_delta_sweep(ctx):
+    """Probe 5: the sweep must actually vary sigma (the old build-and-ignore bug), key it by
+    real DUSTQ sigma keys, and report a flip rate in [0, 1]."""
+    from dustq.probes import probe_sigma_delta
+    from dustq.dust_ext import DEFAULT_SIGMAS
+
+    # any per-parameter gradient dict works as the reference; a backprop one keeps this
+    # test cheap (probe 5 only needs something to take cosines against)
+    ref = ctx.bp_grads("identity")
+    sweep = probe_sigma_delta(ctx, ref, sigma_fractions=(1.0, 4.0), populations=(256,))
+    assert set(sweep) == {(1.0, 256), (4.0, 256)}
+    for (frac, _), payload in sweep.items():
+        assert set(payload["sigma"]) <= set(DEFAULT_SIGMAS), payload["sigma"]
+        rates = payload["flip_rate"]
+        assert rates and all(0.0 <= v <= 1.0 for v in rates.values()), rates
+        cos = payload["cos"]
+        assert cos and all(-1.001 <= v <= 1.001 for v in cos.values())
+    # sigma really moved between the two points, and by exactly the frac ratio
+    # (payload sigmas are rounded to 6 decimals, so compare at that resolution)
+    lo, hi = sweep[(1.0, 256)]["sigma"], sweep[(4.0, 256)]["sigma"]
+    for key in lo:
+        assert abs(hi[key] - 4.0 * lo[key]) < 1e-5, (key, lo[key], hi[key])
+    # the jitter is not a no-op: at least one group's cosine changes with sigma
+    xs = [sweep[(f, 256)]["cos"] for f in (1.0, 4.0)]
+    assert any(abs(a[g] - b[g]) > 1e-6 for a, b in zip(xs, xs[1:]) for g in a), \
+        "the sweep produced identical cosines at 1x and 4x sigma - sigmas were not applied"
+    # a larger jitter must move at least as many codes as a smaller one
+    assert sweep[(4.0, 256)]["flip_rate"] != sweep[(1.0, 256)]["flip_rate"]

@@ -42,20 +42,38 @@ def set_exact_path(model: nn.Module, enabled: bool, mode: str | None = None) -> 
                 module._exact_mode = mode
 
 
-def site_sigma(name: str, n_layer: int) -> float:
-    """Dust's per-site noise scale matched to our activation-quant sites [design]:
-    c_q/c_k/c_v -> the local-internals sigma (their own linears' jitter site);
-    attn.c_proj -> the o@l hub sigma (0.2 shallow half / 0.4 deep half, by layer);
-    mlp.c_fc -> the hidden sigma; mlp.c_proj -> the writer sigma. Single source of
-    truth: dustq.dust_ext.DEFAULT_SIGMAS."""
+def site_sigma_key(name: str, n_layer: int) -> str | None:
+    """Dust sigma key (keys of dustq.dust_ext.DEFAULT_SIGMAS) matched to one of our
+    activation-quant sites [design]: c_q/c_k/c_v -> "local" (their own linears' jitter
+    site); attn.c_proj -> the o@l hub sigma ("hub_shallow"/"hub_deep" by layer, because
+    Dust's o@ pre-hook jitters this linear's INPUT, which is also what we quantize);
+    mlp.c_fc -> "hidden"; mlp.c_proj -> "writer". Returns None for sites outside the
+    act-quant set (wte/lm_head have no act hook), whose Dust keys (emb/head) and the
+    weight-space "scalar" keep their upstream defaults. Single source of truth for the
+    forward map (site -> key) and the inverse used by probe 5."""
     if name.endswith("attn.c_proj"):
         layer = int(name.split(".h.")[1].split(".")[0])
-        return DEFAULT_SIGMAS["hub_shallow"] if layer < n_layer // 2 else DEFAULT_SIGMAS["hub_deep"]
+        return "hub_shallow" if layer < n_layer // 2 else "hub_deep"
     if name.endswith(("attn.c_q", "attn.c_k", "attn.c_v")):
-        return DEFAULT_SIGMAS["local"]
+        return "local"
     if name.endswith("mlp.c_fc"):
-        return DEFAULT_SIGMAS["hidden"]
-    return DEFAULT_SIGMAS["writer"]
+        return "hidden"
+    if name.endswith("mlp.c_proj"):
+        return "writer"
+    return None
+
+
+def site_sigma(name: str, n_layer: int) -> float:
+    """Dust's per-site noise scale matched to our activation-quant sites [design]; see
+    site_sigma_key for the mapping. Single source of truth: DEFAULT_SIGMAS."""
+    key = site_sigma_key(name, n_layer)
+    # the fallback preserves the pre-refactor value for names outside the act sites
+    return DEFAULT_SIGMAS[key] if key is not None else DEFAULT_SIGMAS["writer"]
+
+
+def site_unsigned(name: str) -> bool:
+    """Public accessor for the unsigned-grid rule (the ReLU^2 output feeding mlp.c_proj)."""
+    return _site_matches(name, _UNSIGNED_SITES) is not None
 
 
 def parse_precision(precision: str) -> tuple[str, int, str]:

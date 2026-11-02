@@ -125,12 +125,18 @@ class ProbeContext:
 
     # ---- gradient collection ----
 
-    def _ensure_hooks(self, ste_mode: str = "identity") -> None:
+    def _ensure_hooks(self, ste_mode: str = "identity", force: bool = False) -> None:
         """Activation-quant hooks must exist for EVERY gradient path — including the Dust
         paths (the estimator measures the QUANTIZED forward). Lazy registration here was a
         silent-correctness bug: dust_grads ran with quantized weights but float
-        activations. Registered once per mode; the SMOKE task keeps absmax (no alpha table)."""
-        if getattr(self, "_hook_mode", None) == ste_mode and getattr(self, "_hook_handles", None):
+        activations. Registered once per mode; the SMOKE task keeps absmax (no alpha table).
+
+        `force` re-registers even when the mode is unchanged: on the Dust path the hooks
+        must land AFTER upstream's o@l noise hook on EVERY call (DUSTQ.close() removes
+        Dust's hooks but leaves ours in place, so a cached registration order would put us
+        back in front of the next estimator's noise)."""
+        if not force and getattr(self, "_hook_mode", None) == ste_mode \
+                and getattr(self, "_hook_handles", None):
             return
         for h in getattr(self, "_hook_handles", []):
             h.remove()
@@ -154,9 +160,16 @@ class ProbeContext:
         from .dust_ext import DUSTQ
         model = self.model
         model.requires_grad_(True)
-        self._ensure_hooks("identity")
         settings = recipe(self.cfg.tokens, population, model.config.n_layer)
+        # Hook order is load-bearing (qmodel.py header, Runner._build): construct the
+        # estimator FIRST, then attach the act-quant hooks, giving noise -> quantize.
+        # The probes used to do this in the opposite order, so the estimator's jitter was
+        # applied to an already-quantized input (and on the tf32/fp32 exact paths it was
+        # dropped entirely, because QLinear's codes are computed from the clean input the
+        # act hook sees). That made every Dust probe gradient a different function from
+        # the one Tier B trains.
         est = DUSTQ(model, settings, seed=seed, sigmas=sigmas)
+        self._ensure_hooks("identity", force=True)
         opt = torch.optim.SGD(model.parameters(), lr=0.0 if not apply_update else 1e-3)
         est.step(self.x, self.y, opt)
         grads = collect_grads(model)
@@ -368,53 +381,112 @@ def fit_cos_law(cos: dict[int, float]):
 
 # ---------- probe 5: sigma-Delta ----------
 
-def median_step(acts, lo_hi):
-    """Median grid step of the site's per-token scale (median over pooled activations)."""
-    return acts.abs().median().item() / 255.0
+def median_delta(scales) -> float:
+    """Median per-token grid step Delta. For our quantizer the code spacing IS the
+    per-token scale (codes are integers; dequant = code x scale), so Delta = median(scale).
+    The previous /255 was an 8-bit absmax artifact and is meaningless on the A4/A2
+    mse_alpha grids this sweep runs on."""
+    return float(scales.detach().float().median().item())
 
 
 def probe_sigma_delta(ctx, reference, sigma_fractions=(1 / 8, 1 / 4, 1 / 2, 1, 2, 4, 8, 16),
                       populations=(256, 1024)) -> dict:
-    """Probe 5: per site group, sigma in sigma_fractions x median Delta at each K; record
-    cosine to ref, flip rate (fraction of activation codes differing clean vs jittered),
-    and mean |reward|. Flip rate is the direct dead-zone/smoothing diagnostic."""
+    """Probe 5: hold Dust's jitter at sigma = frac x the site's grid step Delta and measure
+    what survives. Per (frac, K): per-group cosine to the backprop reference (same grouping
+    as probes 2/3). Per frac: the activation-code FLIP RATE — the fraction of codes a
+    single Dust-scale draw moves off their clean value — which is the direct dead-zone /
+    smoothing diagnostic the sweep exists to expose.
+
+    Sweep design [design]: sigma is scaled jointly for the jitter families that have an
+    activation-quant counterpart (local, hub_shallow/hub_deep, hidden, writer — the
+    inverse of qmodel.site_sigma_key); emb/head/scalar keep their upstream defaults. So
+    sigma = frac x Delta means "one draw's std, in units of one code step" (1x = noise the
+    width of a code, 16x = noise crossing many). Cross-tensor caveat [design]: only
+    attn.c_proj's input is both jittered (Dust's o@l pre-hook) and quantized (our hook);
+    for the other three families Dust jitters a neighbouring tensor of the same site, so
+    the sigma-vs-Delta ratio compares nearby tensors rather than identical ones.
+
+    Flip rate is a property of the quantizer and the jitter only — independent of the
+    matmul mode and of K — so it is computed once per frac and repeated for each K."""
+    from torch import nn
+
     from dustq import qmodel
 
-    # clean codes per site from one clean forward (spy hooks registered last, after the
-    # act-quant hooks, and re-saved on every module call).
-    clean_codes = {}
+    ctx._ensure_hooks("identity")  # the spies must attach AFTER the act-quant pre-hooks
+    _, bits, _ = qmodel.parse_precision(ctx.cfg.precision)
+
+    # Spy pre-hooks (chained after the act hooks, so they see the quantized input) capture
+    # the clean codes, the per-token scale and a bounded slice of the raw input per site.
+    clean: dict[str, dict] = {}
 
     def spy(name):
         def hook(module, args):
-            if getattr(module, "_act_codes", None) is not None:
-                clean_codes[name] = module._act_codes.detach().clone()
+            if getattr(module, "_act_codes", None) is None:
+                return None
+            x = args[0]
+            if x.is_floating_point():
+                # two sequences only: flips need a bounded sample, and this keeps the big
+                # tensors off the GPU for the whole sweep
+                clean[name] = {
+                    "input": x.detach()[:2].clone(),
+                    "codes": module._act_codes.detach()[:2].clone(),
+                    "scale": module._act_scale.detach().clone(),
+                }
             return None
         return hook
 
-    handles = []
-    for name, module in ctx.model.named_modules():
-        site = next((s for s in SITE_GROUPS if name.endswith("." + s) or name == s), None)
-        if site and isinstance(module, torch.nn.Linear):
-            handles.append(module.register_forward_pre_hook(spy(site)))
+    handles = [module.register_forward_pre_hook(spy(name))
+               for name, module in ctx.model.named_modules()
+               if qmodel._site_matches(name, qmodel.ACT_QUANT_SITES)
+               and isinstance(module, nn.Linear)]
+    was_training = ctx.model.training
     ctx.model.eval()
     with torch.no_grad():
         ctx.model(ctx.x, ctx.y)
     for h in handles:
         h.remove()
+    ctx.model.train(was_training)
+
+    # one Delta per Dust sigma key, averaged over the sites that map to it
+    n_layer = ctx.model.config.n_layer
+    per_key: dict[str, list[float]] = {}
+    for name, data in clean.items():
+        key = qmodel.site_sigma_key(name, n_layer)
+        if key is not None:
+            per_key.setdefault(key, []).append(median_delta(data["scale"]))
+    delta = {k: sum(v) / len(v) for k, v in sorted(per_key.items())}
+
+    def flip_rates(sigmas: dict) -> dict:
+        """Fraction of clean activation codes that one Dust-scale draw moves, per group."""
+        rates = {}
+        for name, data in clean.items():
+            key = qmodel.site_sigma_key(name, n_layer)
+            sigma = sigmas.get(key)
+            if key is None or sigma is None:
+                continue
+            x, codes, scale = data["input"], data["codes"], data["scale"]
+            scale = scale[: x.shape[0]]  # same leading window as the sliced codes/input
+            if qmodel.site_unsigned(name):
+                lo, hi = 0, 2 ** bits - 1
+            else:
+                lo, hi = -(2 ** (bits - 1)), 2 ** (bits - 1) - 1
+            noise = torch.randn(x.shape, generator=torch.Generator().manual_seed(7))
+            noise = noise.to(x.device, x.dtype).mul_(sigma)
+            moved = (torch.clamp(torch.round((x + noise) / scale), lo, hi) != codes)
+            rates[group_of(name + ".weight")] = float(moved.float().mean().item())
+        return {g: rates[g] for g in sorted(rates)}
 
     out = {}
     for frac in sigma_fractions:
+        sigmas = {k: frac * d for k, d in delta.items()}
+        flips = flip_rates(sigmas)
         for k in populations:
-            sigmas = {}
-            for site in SITE_GROUPS:
-                acts = clean_codes.get(site)
-                if acts is None:
-                    continue
-                delta = median_step(acts, None)
-                sigmas[site] = frac * max(delta, 1e-5)
-            g = ctx.dust_grads(seed=0, population=k)
-            cos = {gname: cosine(g[gname], reference[gname]) for gname in reference if gname in g}
-            out[(frac, k)] = {"cos": cos, "sigma_scale": frac}
+            g = ctx.dust_grads(seed=0, population=k, sigmas=sigmas)
+            out[(frac, k)] = {
+                "cos": cosine_by_group(g, reference),
+                "flip_rate": flips,
+                "sigma": {key: round(val, 6) for key, val in sigmas.items()},
+            }
     return out
 
 
@@ -468,8 +540,27 @@ def main():
     if 5 in which:
         print("probe 5: sigma-Delta sweep", flush=True)
         sweep = probe_sigma_delta(ctx, ref)
-        report["sigma_delta"] = {f"{k[0]:.3f}x@{k[1]}": v["cos"] for k, v in sweep.items()}
-        print(json.dumps(report["sigma_delta"], indent=1))
+        # compact table + the raw dict: cos per (frac, K), flip rate per frac (constant in K)
+        print("  frac   K      mean_cos   flip_rate (per group)")
+        for frac in sorted({k[0] for k in sweep}):
+            for k in sorted(kk for kk in sweep if kk[0] == frac):
+                cos = sweep[(frac, k)]["cos"]
+                flips = sweep[(frac, k)]["flip_rate"]
+                mean_cos = sum(cos.values()) / max(len(cos), 1)
+                mean_flip = sum(flips.values()) / max(len(flips), 1)
+                detail = " ".join(f"{g}={v:.3f}" for g, v in flips.items())
+                print(f"  {frac:5.3f}  {k:<5d}  {mean_cos:+8.4f}   "
+                      f"{mean_flip:.4f}  | {detail}")
+        fracs = sorted({k[0] for k in sweep})
+        ks = sorted({k[1] for k in sweep})
+        report["sigma_delta"] = {
+            # flip rate and sigma do not vary with K; report them once per frac
+            "cos": {f"{k[0]:.3f}x@{k[1]}": v["cos"] for k, v in sweep.items()},
+            "flip_rate": {f"{f:.3f}x": sweep[(f, ks[0])]["flip_rate"] for f in fracs},
+            "sigma": {f"{f:.3f}x": sweep[(f, ks[0])]["sigma"] for f in fracs},
+        }
+        print("sigma per key at 1x:", json.dumps(sweep[(1.0, ks[0])]["sigma"])
+              if 1.0 in fracs else f"(no 1.0 point; deltas {sweep[(fracs[0], ks[0])]['sigma']})")
 
     if 4 in which:
         print("probe 4: directional descent", flush=True)

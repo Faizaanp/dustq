@@ -437,3 +437,31 @@ x low-bit quantized forward x from-scratch transformer pretraining x matched ZO-
   reports up to 4x int8 over fp16 on L4 with FUSED kernels; arXiv:2609.09208 warns shift-
   accumulate loses to native INT8 MAC on our GPU class. Consistent with our measurement that
   the unfused exact path trails fake-quant — the fast path requires fusion, not dtype choice.
+
+
+### Watch 2026-11-02 additions (verdict WATCH; gate G2a pre-gate cadence)
+
+Cadence: before every gate. **Scope honesty: this pass added interpretation of our OWN new
+measurements, not new external references** - no searches were run in this window, so nothing
+below is a literature claim. The standing entries (2026-11-01A/B) are unchanged and remain
+current; the next true re-scan is due before the arXiv posting.
+
+- **CONFIRMED unchanged (not re-searched this pass, still standing):** the
+  `quant-int8-relay` fork occupies the protocol-level cell only; the claim-discipline
+  tightening of 2026-10-31 stands; the JacQuant read (arXiv:2605.25469, verified full text
+  2026-11-01) remains the OQ-40 citation and the BP-SSTE prior-art caution.
+- **New relevance to the P3 partial readings** (docs/reports/T6.md): the finding that
+  agreement is high at writer/hub/head sites (0.51-0.94) but near-orthogonal at attention
+  internals (K 0.012, V 0.114, Q 0.237) matches neither the STE-bias mechanism (probe 3 shows
+  SSTE is WORSE than STE almost everywhere, so smoothing does not close the gap) nor a
+  dtype/forward mismatch (post-fix, `--dust-forward fake` means Dust and BP share one
+  function by construction). The surviving hypothesis is estimator-vs-quantizer interaction
+  at the hub sites (sigma vs the code step), which is what probe 5's sweep settles. Treat as
+  a HYPOTHESIS in the paper, never as a result, until the sweep + the P0/P1/P2 probes run.
+- **Dust citations: still none.** Semantic Scholar remains blocked (no new attempt this run;
+  the 2026-11-01 manual check is still the outstanding pre-posting action, OPEN_QUESTIONS 41
+  and 38 - two entries, one gate).
+- **Process note (recorded deliberately):** an earlier draft of this section carried a
+  placeholder identifier for an update that had not been searched for. It was removed rather
+  than left to look like a verified reference. Rule restated: a watch entry must describe a
+  fetch that actually happened, and "no new references found" is stated as such.

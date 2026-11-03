@@ -112,12 +112,30 @@ class ProbeContext:
         self.best_val = best
         if self.batch is not None:
             self.x, self.y = self.batch
+        elif self.cfg.data_dir == "synthetic":
+            # local-only fallback, mirroring Runner._load_data: the same batch a synthetic
+            # checkpoint was trained on. Without it the probe CLI could not be run off the
+            # L4 at all (it demanded data/train_1M.pt), which is how the reporting crash
+            # reached Colab untested. 8 sequences, as the drive path uses.
+            from .runner import tiny_batch
+
+            vocab = self.model.config.vocab_size
+            length = self.model.config.sequence_len
+            self.x, self.y = tiny_batch(self.device, seed=self.cfg.seed + 1,
+                                        sequences=8, length=length, vocab=vocab)
         else:
             rows = load_sequences(Path(self.cfg.data_dir) / "train_1M.pt", 8)
             self.x = rows[:, :-1].contiguous().to(self.device)
             self.y = rows[:, 1:].contiguous().to(self.device)
         if self.heldout is not None:
             self.vx, self.vy = self.heldout
+        elif self.cfg.data_dir == "synthetic":
+            from .runner import tiny_batch
+
+            vocab = self.model.config.vocab_size
+            length = self.model.config.sequence_len
+            self.vx, self.vy = tiny_batch(self.device, seed=90 + self.cfg.seed,
+                                          sequences=8, length=length, vocab=vocab)
         else:
             val = load_sequences(Path(self.cfg.data_dir) / "val.pt", 8)
             self.vx = val[:, :-1].contiguous().to(self.device)
@@ -509,10 +527,18 @@ def main():
     which = {int(p) for p in args.probes.split(",")}
     report = {}
 
+    def save() -> None:
+        """Write the report so far. Called after every probe so a later crash (or an L4
+        session timeout) cannot take the completed, expensive probes' results with it."""
+        path = Path(args.out) / f"{cfg.run_id}_probes.json"
+        path.write_text(json.dumps(report, indent=1))
+        print("wrote", path, flush=True)
+
     if 0 in which:
         print("probe 0: seed-pair noise floor", flush=True)
         noise = probe_seed_noise(ctx)
         report["seed_noise"] = noise
+        save()
         print(json.dumps(noise, indent=1))
         flat = [v for groups in noise.values() for v in groups.values()]
         if flat:
@@ -523,27 +549,42 @@ def main():
     if which & {1, 2, 3, 5}:
         _, ref, reliability = probe_reference(ctx)
         report["reliability"] = reliability
+        save()
         print(f"probe 1: reference K=16384 halves -> reliability {reliability:.4f}", flush=True)
 
     if 2 in which:
         print("probe 2: cosine ladders", flush=True)
         ladders = probe_cosine_ladders(ctx, reference=ref)
         report["cosine_ladders"] = {str(k): v for k, v in ladders.items()}
+        save()
         print(json.dumps(report["cosine_ladders"], indent=1))
 
     if 3 in which:
         print("probe 3: STE/SSTE bias", flush=True)
         bias = probe_ste_bias(ctx, reference=ref)
         report["ste_bias"] = bias
+        save()
         print(json.dumps(bias, indent=1))
 
     if 5 in which:
         print("probe 5: sigma-Delta sweep", flush=True)
         sweep = probe_sigma_delta(ctx, ref)
-        # compact table + the raw dict: cos per (frac, K), flip rate per frac (constant in K)
+        fracs = sorted({key[0] for key in sweep})
+        ks = sorted({key[1] for key in sweep})
+        report["sigma_delta"] = {
+            # flip rate and sigma do not vary with K; report them once per frac
+            "cos": {f"{k[0]:.3f}x@{k[1]}": v["cos"] for k, v in sweep.items()},
+            "flip_rate": {f"{f:.3f}x": sweep[(f, ks[0])]["flip_rate"] for f in fracs},
+            "sigma": {f"{f:.3f}x": sweep[(f, ks[0])]["sigma"] for f in fracs},
+        }
+        # Persist BEFORE pretty-printing. The 2026-11-02 session lost a full 16-point sweep
+        # because a KeyError in the table (sweep[(frac, k)] with k already a (frac, K) key)
+        # fired after the expensive work and before the JSON write. Data first, cosmetics
+        # second — and every probe saves as it goes.
+        save()
         print("  frac   K      mean_cos   flip_rate (per group)")
-        for frac in sorted({k[0] for k in sweep}):
-            for k in sorted(kk for kk in sweep if kk[0] == frac):
+        for frac in fracs:
+            for k in ks:
                 cos = sweep[(frac, k)]["cos"]
                 flips = sweep[(frac, k)]["flip_rate"]
                 mean_cos = sum(cos.values()) / max(len(cos), 1)
@@ -551,16 +592,10 @@ def main():
                 detail = " ".join(f"{g}={v:.3f}" for g, v in flips.items())
                 print(f"  {frac:5.3f}  {k:<5d}  {mean_cos:+8.4f}   "
                       f"{mean_flip:.4f}  | {detail}")
-        fracs = sorted({k[0] for k in sweep})
-        ks = sorted({k[1] for k in sweep})
-        report["sigma_delta"] = {
-            # flip rate and sigma do not vary with K; report them once per frac
-            "cos": {f"{k[0]:.3f}x@{k[1]}": v["cos"] for k, v in sweep.items()},
-            "flip_rate": {f"{f:.3f}x": sweep[(f, ks[0])]["flip_rate"] for f in fracs},
-            "sigma": {f"{f:.3f}x": sweep[(f, ks[0])]["sigma"] for f in fracs},
-        }
-        print("sigma per key at 1x:", json.dumps(sweep[(1.0, ks[0])]["sigma"])
-              if 1.0 in fracs else f"(no 1.0 point; deltas {sweep[(fracs[0], ks[0])]['sigma']})")
+        if 1.0 in fracs:
+            print("sigma per key at 1x:", json.dumps(sweep[(1.0, ks[0])]["sigma"]))
+        else:
+            print("(no 1.0 point; deltas", json.dumps(sweep[(fracs[0], ks[0])]["sigma"]), ")")
 
     if 4 in which:
         print("probe 4: directional descent", flush=True)
@@ -573,10 +608,10 @@ def main():
         dd = probe_directional_descent(ctx, cand)
         report["directional_descent"] = {k: {"train": v["train"], "val": v["val"]}
                                          for k, v in dd.items()}
+        save()
         print(json.dumps(report["directional_descent"], indent=1))
 
-    (Path(args.out) / f"{cfg.run_id}_probes.json").write_text(json.dumps(report, indent=1))
-    print("wrote", Path(args.out) / f"{cfg.run_id}_probes.json")
+    save()
 
 
 if __name__ == "__main__":

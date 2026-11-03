@@ -230,3 +230,43 @@ def test_sigma_delta_sweep(ctx):
         "the sweep produced identical cosines at 1x and 4x sigma - sigmas were not applied"
     # a larger jitter must move at least as many codes as a smaller one
     assert sweep[(4.0, 256)]["flip_rate"] != sweep[(1.0, 256)]["flip_rate"]
+
+
+def test_probes_cli_main_end_to_end(tmp_path, monkeypatch):
+    """Regression for the 2026-11-02 reporting crash. No test ever exercised main() - the
+    fixture tests call the probes directly - so a KeyError in the sigma-Delta table reached
+    the L4 after the full sweep had already computed. Runs the real CLI path in-process with
+    the expensive K=16k reference swapped for a cheap one (the reference's QUALITY is not
+    what this test is about; its plumbing and every reporting block are)."""
+    import sys
+
+    import yaml
+
+    import dustq.probes as probes
+
+    cfg = RunConfig(task="PCKPT", size="tiny", tokens="1M", precision="w1.58a4",
+                    method="backprop", seed=0, data_dir="synthetic", steps=2,
+                    eval_interval=2, output_dir=str(tmp_path)).resolved()
+    Runner = __import__("dustq.train", fromlist=["Runner"]).Runner
+    Runner(cfg).train()
+    yaml_path = tmp_path / "cfg.yaml"
+    yaml_path.write_text(yaml.safe_dump(cfg.to_yaml_dict()), encoding="utf-8")
+
+    cheap_ref = probes.ProbeContext(cfg).bp_grads("identity")
+    monkeypatch.setattr(probes, "probe_reference", lambda *a, **k: (None, cheap_ref, 0.99))
+    monkeypatch.setattr(sys, "argv", [
+        "dustq.probes", "--config", str(yaml_path),
+        "--probes", "3,2,5,0", "--out", str(tmp_path / "probes")])
+    probes.main()
+
+    path = tmp_path / "probes" / f"{cfg.run_id}_probes.json"
+    assert path.is_file(), "main() must write its report JSON"
+    report = json.loads(path.read_text())
+    assert {"seed_noise", "reliability", "cosine_ladders", "ste_bias", "sigma_delta"} <= set(report)
+    assert report["reliability"] == 0.99
+    sd = report["sigma_delta"]
+    assert sd["cos"] and sd["flip_rate"] and sd["sigma"], \
+        "the sweep must report cos, flip rate and sigma (the crash here lost all of it)"
+    assert all(-1.001 <= v <= 1.001 for groups in sd["cos"].values() for v in groups.values())
+    for groups in sd["flip_rate"].values():
+        assert all(0.0 <= v <= 1.0 for v in groups.values()), groups

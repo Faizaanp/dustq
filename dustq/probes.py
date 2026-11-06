@@ -529,8 +529,14 @@ def main():
 
     def save() -> None:
         """Write the report so far. Called after every probe so a later crash (or an L4
-        session timeout) cannot take the completed, expensive probes' results with it."""
-        path = Path(args.out) / f"{cfg.run_id}_probes.json"
+        session timeout) cannot take the completed, expensive probes' results with it.
+
+        The filename carries the probe set: the session script runs each subset as its own
+        subprocess, and a fixed name meant the later subsets silently overwrote the earlier
+        ones' JSON (probe 5's write erased the ladder and the descent that G2a needs).
+        """
+        tag = "-".join(str(p) for p in sorted(which))
+        path = Path(args.out) / f"{cfg.run_id}_probes_{tag}.json"
         path.write_text(json.dumps(report, indent=1))
         print("wrote", path, flush=True)
 

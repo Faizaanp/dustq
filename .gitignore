@@ -25,21 +25,31 @@ opencode.json
 
 # ---------------------------------------------------------------------------
 # Internal-only: kept on disk for us, NOT shipped in the public repo.
-# Remove a line here and `git add -f` the file to publish it again.
 # Rationale: internal process, owner decisions and compute-budget bookkeeping
 # add nothing for a reader of the public repo, and some name the owner's
 # compute allowance explicitly. The scientific record (hypotheses, plan,
 # upstream map, related work, gate reports) stays tracked.
+# To publish one of these again: delete its line here and `git add -f` it.
 # ---------------------------------------------------------------------------
+# docs/OPEN_QUESTIONS.md     -- owner decisions, budget/CU, watch tripwires
+# docs/FINDINGS.md           -- internal findings log
+# docs/MONITORING.md         -- standing-watch agent protocol
+# docs/CUT_CELLS.md          -- internal compute budget registry
+# docs/PUBLICATION_STAGES.md -- already listed above
 
-docs/OPEN_QUESTIONS.md        # owner decisions, budget/CU, watch tripwires
-docs/FINDINGS.md              # internal findings log
-docs/MONITORING.md            # standing-watch agent protocol
-docs/CUT_CELLS.md            # internal compute budget registry
-docs/PUBLICATION_STAGES.md    # (already listed above)
+docs/OPEN_QUESTIONS.md
+docs/FINDINGS.md
+docs/MONITORING.md
+docs/CUT_CELLS.md
+docs/PUBLICATION_STAGES.md
 
-docs/reports/STATUS-*.md      # internal status snapshots
-docs/reports/REVIEW-*.md      # internal review notes
-docs/reports/WATCH/           # literature-surveillance working notes
-docs/plans/                   # superseded/internal planning
-docs/specs/                   # internal engineering specs
+docs/reports/STATUS-*.md
+docs/reports/REVIEW-*.md
+docs/reports/WATCH/
+docs/plans/
+docs/specs/
+
+# Superseded planning drafts. The canonical plan is
+# "Dust-Q Implementation Plan v3.md" and stays tracked; v1/v2 do not.
+docs/planning/Dust-Q Handoff Implementation Plan.md
+docs/planning/Dust-Q Full-Paper Expansion.md

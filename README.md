@@ -229,8 +229,6 @@ Detailed documentation and research logs are tracked in `docs/`:
 - [**Related Work & Novelty Scan**](docs/related_work.md): The literature landscape, our positioning, and the watch deltas.
 - [**Gate reports**](docs/reports/): Verification evidence for G0 (T0/T1/T3), G1 (T4), the quantization implementation and its performance (T5), and the probe suite (T6).
 
-> Internal working notes — the open-questions log, findings log, watch-surveillance reports, planning drafts and compute-budget bookkeeping — are deliberately not part of this repository.
-
 ---
 
 

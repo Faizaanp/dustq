@@ -42,6 +42,17 @@ had cited Dust as of 2026-10-11. The watch turns that one-time scan into a stand
    full-text read; AGZO/ZO-Act need primary-source verification). Resolve what can be
    resolved with fetches.
 
+## Findings log — `docs/FINDINGS.md`
+
+Every watch run's material findings are also appended to `docs/FINDINGS.md`, the project's
+single append-only log of bugs, gate readings, watch results, corrected claims and process
+lessons. It is the first place to check when a question like "what happened with the sigma
+sweep?" or "was Dust ever cited?" comes up. Write the watch report for the detail and the
+fetch evidence; write one dated, tagged, index-linked entry to FINDINGS.md for the finding
+itself. A correction to an earlier claim (e.g. a "Dust still uncited" statement that later
+becomes false) goes into FINDINGS.md as a dated entry *and* gets corrected in place in the
+file that carries the claim, with the original line preserved.
+
 ## Output format — `docs/reports/WATCH/YYYY-MM-DD.md`
 
 ```

@@ -226,6 +226,7 @@ Detailed documentation and research logs are tracked in `docs/`:
 - [**Pre-registered Hypotheses**](docs/HYPOTHESES.md): Primary and secondary endpoints, paired-seed bootstrap methodology, and early exit criteria.
 - [**Upstream Repository Map**](docs/REPO_MAP.md): Detailed line-by-line mapping against upstream Q Labs `dust.py`.
 - [**Open Questions & Tracking**](docs/OPEN_QUESTIONS.md): Active tracking of experimental and theoretical questions.
+- [**Findings Log**](docs/FINDINGS.md): **Start here when you want to know what has been found out.** One append-only log of every bug, gate reading, watch result, corrected claim and process lesson, dated and linked to its evidence.
 
 ---
 

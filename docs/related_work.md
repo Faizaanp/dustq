@@ -465,3 +465,72 @@ current; the next true re-scan is due before the arXiv posting.
   placeholder identifier for an update that had not been searched for. It was removed rather
   than left to look like a verified reference. Rule restated: a watch entry must describe a
   fetch that actually happened, and "no new references found" is stated as such.
+
+### Watch 2026-11-06 additions (verdict **WATCH**; full re-scan, see docs/reports/WATCH/2026-11-06.md)
+
+The real re-scan the 2026-11-02 entry promised. Every item below was fetched on 2026-11-06 and
+is tagged; the report records exactly which engines were used, and which failed.
+
+**Citation status — one arXiv citation now exists, and our old wording was wrong.** The classic
+arXiv full-text endpoint (`search_classic?searchtype=ft`, which the Atom API's `full_text`
+mode cannot do — HTTP 500 since 2026-10-31) returns **one** paper citing Dust:
+**arXiv:2610.33826v2** "Reactive Optimizers" (Bai, Liang, Teoh, Sitzmann; v1 2026-10-24,
+v2 2026-11-04) [paper, full LaTeX HTML read]. Its bibliography carries the Dust report URL
+verbatim; Dust appears **only in the reference list** (3 occurrences, zero body mentions), and a
+keyword scan for `quantiz|int8|ternary|low-bit|1.58` over the whole paper returns no hits. So:
+**one bibliography-only citation, in a paper outside our cell.** `STATUS-2026-11-01.md`'s flat
+"Dust still uncited" is corrected in place with a dated note; OPEN_QUESTIONS #41 carries the
+corrected wording and the standing gate. The gate is **not** closed: Semantic Scholar (5th
+consecutive 429) and Google Scholar (new JS challenge) both failed, and they are the only
+channels that catch an author-name-keyed citation. One arXiv paper also now cites the Noise
+benchmark by title (**arXiv:2611.04488**, Perseus; FHE inference, not our cell) [paper].
+
+**Noise benchmark (`qlabs-eng/noise`) — the ACT tripwire is still armed and quiet** [paper].
+450 stars (440 at 11-01), 63 forks (59), 53 PRs (2 new). Track-2 record is now
+**3.49652 in 14.24 s** (PR #56, 16 runs, t-test p = 4e-11, median-not-best logged) — fresher
+than the 3.991/3.896/3.658 figures our claims were written against, so OQ-31's staleness
+warning has now bitten; re-quote before posting. The only low-precision content anywhere on
+the frontier is **operand** precision inside credit kernels (bf16 GEMMs, TF32 before), and PR
+#56's "What didn't work" records **fp8 operands tried and rejected** ("best case is ~0.05 ms
+per estimate"). The model forward stays fp/bf16. Rules text is **verbatim unchanged** since the
+2026-10-22 rewrite, including the non-differentiable-parts clause. Discussions are now enabled
+but empty. All 53 PR titles re-scanned for `quant|int8|ternary|low-bit|1.58|fake-quant|integer|
+_int_mm`: zero hits.
+
+**Fork `quant-int8-relay` — unchanged, byte-identical** [paper]: HEAD still `fdaca52b3fa98ed21c1e424a127f86e780c5c84`
+(Bernardo Ramos, 2026-10-21), `pushed_at` identical to the 10-31/11-01 reports, 0 forks, and a
+GitHub search for the branch name returns 0 repositories. Nothing has superseded or replicated
+it. The 2026-10-31 tightening stands.
+
+**JacQuant (arXiv:2605.25469) still v1** [paper, abs page + Atom `<updated>` ==
+`<published>`]: no v2, so the verbatim charter quotation used for the OQ-40 recommendation
+remains the current text.
+
+**New adjacent work (none in our cell)** [paper, abstracts read via the arXiv API]:
+- **arXiv:2611.04797** MobileSpec/FuRA-S (Yequan Zhao cluster): forward-only, **weight-space**
+  block-spectral ZO, INT4 **fine-tuning**. Newest weight-space-ZO x INT4 entry.
+- **arXiv:2611.02688** ZO-Curv: ZO estimates feed curvature for a **first-order** AdamW update
+  on idle serving compute; its own framing — "the alignment of a ZO gradient estimate with the
+  true gradient shrinks as the number of updated parameters grows", so ZO gradients "break down
+  in pretraining" — is a citable statement of exactly the problem our from-scratch ZO
+  pretraining addresses. Motivation wording only.
+- **arXiv:2610.04867v2** Greedy Local Learning for LM pretraining (NeurIPS 2026 CODEC-FM
+  workshop): the most rigorous "pretraining without global backprop, token-budget-matched"
+  measurement we have seen; no quantization, no ZO.
+- **arXiv:2606.03938v2 q0** (Dust authors, never logged before): 1.8B hyper-epoch pretraining,
+  backprop. **Terminology caution**: q0's "population of diverse models" is a *different object*
+  from Dust's "virtual population" of perturbed activations — do not let a reviewer or a
+  generated bibliography conflate them.
+- **arXiv:2610.38331** (Multi-Token Prediction Done Right) and **arXiv:2610.40051** (Rethinking
+  Pre-pretraining) — ledger only.
+
+**New ZO+quantization fine-tuning entries since ~2026-10-27: none** beyond MobileSpec. The
+previously-logged set is unchanged with no new versions (FOGZO, ZeroQAT, CAQ-ZO, TerMeZO, GRZO,
+QES, Poor Man's Training all at their recorded versions); the newest ZO+quantization ML entry is
+still TerMeZO (Sept 27), the newest BitNet entry still BitMTP (Oct 20).
+
+**Blocking (recorded, not skipped):** Semantic Scholar API 429 (5th run) and UI AWS-WAF;
+Google Scholar JS challenge (new); arXiv Atom `full_text` mode HTTP 500 (known-broken, worked
+around via the classic endpoint — note the two endpoints differ in corpus coverage, so a
+full-text negative is slightly weaker than it looks). Springer/OpenReview/ACL Anthology were out
+of scope and not attempted. No claim above rests on an unfetched item.

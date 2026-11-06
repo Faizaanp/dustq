@@ -49,6 +49,10 @@ docs/reports/WATCH/
 docs/plans/
 docs/specs/
 
+# Session-measurement reports: burn rate, wall-clock and VRAM detail
+docs/reports/T1.md
+docs/reports/T5-addendum-perf.md
+
 # Superseded planning drafts. The canonical plan is
 # "Dust-Q Implementation Plan v3.md" and stays tracked; v1/v2 do not.
 docs/planning/Dust-Q Handoff Implementation Plan.md

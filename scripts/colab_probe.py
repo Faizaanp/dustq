@@ -132,26 +132,43 @@ DUST_FORWARD = "fake"
 # in its own subprocess, each saving its own JSON - means a late failure costs only the
 # mechanism data, not the gate reading. That is what cost half of G2a on 2026-11-02.
 P3 = "L4d256_1M_w1p58a4_backprop_K0_s0"
-for run_id, which in [(P3, "3,2,0"), (P3, "4"), (P3, "5")]:
-    print(f"\n=== P3 probes {run_id} (probes {which}, forward={DUST_FORWARD}) ===", flush=True)
-    run_checked([PY, "-m", "dustq.probes", "--config", f"configs/{run_id}.yaml",
-                 "--probes", which, "--dust-forward", DUST_FORWARD])
+STEPS = [(P3, "3,2,0"), (P3, "4"), (P3, "5")]
+STEPS += [(r, "3,2") for r in S_PCKPTS if r != P3]          # P0, P2, P1
+if os.environ.get("M_SPOT", "1") == "1":
+    STEPS.append((M_P3, "2,5"))
 
-# ---- 2. the remaining precisions: cross-precision comparison for the paper ----
-for run_id in [r for r in S_PCKPTS if r != P3]:
-    which = "3,2"
-    print(f"\n=== S probes {run_id} (probes {which}, forward={DUST_FORWARD}) ===", flush=True)
+PROBE_DIR = Path("results/probes")
+
+
+def json_path(run_id: str, which: str) -> Path:
+    """The filename dustq.probes writes for this subset (same tag logic as probes.main)."""
+    tag = "-".join(str(p) for p in sorted(int(p) for p in which.split(",")))
+    return PROBE_DIR / f"{run_id}_probes_{tag}.json"
+
+
+print("\n=== resume plan (done steps are skipped) ===", flush=True)
+todo = []
+for run_id, which in STEPS:
+    done = json_path(run_id, which).is_file()
+    print(f"  {'DONE ' if done else 'TODO '} {run_id} probes {which}", flush=True)
+    if not done:
+        todo.append((run_id, which))
+
+for run_id, which in todo:
+    print(f"\n=== runs {run_id} (probes {which}, forward={DUST_FORWARD}) ===", flush=True)
     run_checked([PY, "-m", "dustq.probes", "--config", f"configs/{run_id}.yaml",
                  "--probes", which, "--dust-forward", DUST_FORWARD])
+    written = json_path(run_id, which)
+    print(f"  -> {written} ({written.stat().st_size if written.is_file() else 'MISSING'} bytes)",
+          flush=True)
+    if not written.is_file():
+        print("  !! step reported success but wrote no JSON - investigate before continuing",
+              flush=True)
+
+skipped = len(STEPS) - len(todo)
+print(f"\nprobe session complete: {(time.monotonic() - T0) / 3600:.2f} h "
+      f"({len(todo)} run, {skipped} skipped as already done)")
 
 # ---- 3. M spot-check at P3 (ladders + sweep, if the budget is comfortable) ----
-if os.environ.get("M_SPOT", "1") == "1":
-    print("\n=== M spot-check (ladders + sweep) ===", flush=True)
-    run_checked([PY, "-m", "dustq.probes", "--config", f"configs/{M_P3}.yaml",
-                 "--probes", "2,5", "--dust-forward", DUST_FORWARD])
 
-print(f"\nprobe session complete: {(time.monotonic() - T0) / 3600:.2f} h "
-      "— copy results/probes/*.json back, plus the G1 loss rows and the "
-      "seed-noise floor printed above")
-print("G2a check (P3): ladder must RISE with K on 'MLP in'/'MLP out'/'Attn out', and "
-      "directional descent 'Dust256'/'Dust1k' train+val must be negative", flush=True)
+

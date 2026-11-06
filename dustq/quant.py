@@ -155,10 +155,13 @@ class _SSTEActQuant(torch.autograd.Function):
 
     Each interior boundary contributes a Gaussian bump in activation units; boundaries
     beyond the code range are excluded (crossing them is clamped away); the sum is
-    truncated to the nearest +/-3 boundaries (negligible beyond). Derived from
+    taken over a tail-bounded neighbourhood (see backward: the width sigma / scale in
+    code units sets how many boundaries still carry weight). Derived from
     d/du E[round(u + sigma_u*e)] = sum_b phi((u - b)/sigma_u)/sigma_u with u = x/s and
     sigma_u = sigma/s; verified against Monte-Carlo finite differences in
-    test_sste_backward_matches_mc."""
+    test_sste_backward_matches_mc, which must cover BOTH sigma_u ~ 1 and sigma_u >> 1
+    (a fixed +/-3 window passed at sigma_u = 1 and silently returned 14-40% of the
+    derivative at A8; see the backward docstring and docs/reports T6)."""
 
     @staticmethod
     def forward(ctx, x, scale, lo, hi, sigma):
@@ -173,12 +176,34 @@ class _SSTEActQuant(torch.autograd.Function):
         lo, hi, sigma = ctx.lo, ctx.hi, ctx.sigma
         u = x / scale
         j0 = torch.floor(u + 0.5)  # nearest code index
+        # Two corrections, both found by the 2026-11-06 probe session (P2's BP-SSTE
+        # collapsed to Attn out -0.045 while BP-STE held 0.87):
+        #
+        # (1) THE SCALE FACTOR. The forward returns codes * scale, so this backward must be
+        #     d/dx of the DEQUANTIZED value. The boundary sum below is
+        #     sum_b phi((u - b)/sigma_u)/sigma_u in code units, i.e. S'(u) - already
+        #     dQ/dx - but the implementation wrote phi(...)/sigma instead of
+        #     phi(...) * scale/sigma, making it 1/Delta too large (100x at Delta=0.01,
+        #     2.5x at Delta=0.4). The original Monte-Carlo test missed it because its MC
+        #     target differentiated round(x/Delta) (the CODE) rather than the output, so
+        #     both sides carried the same 1/Delta. Per-token Delta means this is not a
+        #     constant either, so the direction is perturbed as well as the magnitude.
+        #
+        # (2) THE TRUNCATION. The sum used a fixed +/-3 boundaries, valid only while
+        #     sigma/Delta <~ 1.5. Dust's inherited sigmas (0.05-0.4) are 5-40 code steps
+        #     wide on the A8 grid, where the truncation kept 14-40% of the true derivative.
+        #     That position-dependent loss is what broke the cosine at P2; the width is now
+        #     tail-bounded so the sum is the derivative of the smoothed quantizer at any
+        #     bit-width.
+        sigma_u = float((sigma / scale).max()) if scale.numel() else sigma / scale
+        half = max(3, int(math.ceil(4.0 * sigma_u)))
         gx = torch.zeros_like(x)
-        for d in range(-3, 4):
+        for d in range(-half, half + 1):
             k = j0 + d                       # boundary sits between codes k-1 and k
             b = k - 0.5
             valid = (k >= lo + 1) & (k <= hi) & ((u - b).abs() <= 4 * (sigma / scale))
-            bump = torch.exp(-0.5 * ((x - scale * b) / sigma) ** 2) / (sigma * math.sqrt(2 * math.pi))
+            bump = (torch.exp(-0.5 * ((x - scale * b) / sigma) ** 2)
+                    * scale / (sigma * math.sqrt(2 * math.pi)))
             gx = gx + torch.where(valid, bump, torch.zeros_like(bump))
         return grad_out * gx, None, None, None, None
 

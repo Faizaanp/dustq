@@ -33,29 +33,76 @@ def tiny_recipe():
 
 # ---------- T5 test 7: SSTE backward vs Monte-Carlo ----------
 
+def _sste_mc_forward(x, delta, sigma, lo, hi, n=200_000, seed=0):
+    """E[clamp(round((x + sigma*e)/Delta)) * Delta] - the DEQUANTIZED forward, i.e. exactly
+    what _SSTEActQuant.forward returns, noise-averaged. The original test differentiated
+    round(x/Delta) (the code), which shares the implementation's 1/Delta factor and so could
+    not see it."""
+    g = torch.Generator().manual_seed(seed)
+    q = torch.clamp(torch.round((x.unsqueeze(0) + sigma * torch.randn(n, x.numel(), generator=g)) / delta),
+                    lo, hi) * delta
+    return q.mean(0)
+
+
 def test_sste_backward_matches_mc():
+    """Monte-Carlo agreement at BOTH regimes the old +/-3 test never separated:
+    sigma/Delta ~ 1 (valid) and sigma/Delta >> 1 (the A8 regime that collapsed P2)."""
     torch.manual_seed(0)
-    lo, hi, scale, sigma = -8, 7, 0.05, 0.05
+    lo, hi = -8, 7
     x = torch.tensor([0.0, 0.025, 0.02, 0.05, 0.30, -0.025, -0.10], requires_grad=True)
-    y = _SSTEActQuant.apply(x, torch.full_like(x, scale), lo, hi, sigma)
+    x0 = x.detach()
+
+    # sigma/Delta = 1: the regime the original test covered
+    y = _SSTEActQuant.apply(x, torch.full_like(x, 0.05), lo, hi, 0.05)
     y.sum().backward()
     gx = x.grad.clone()
-
-    q = lambda z: torch.clamp(torch.round(z / scale), lo, hi)
-    x0 = x.detach()
-    n, h = 400_000, 0.002
-    eps = torch.randn(n, x0.numel())
-    mc = (q(x0 + h + sigma * eps).mean(0) - q(x0 - h + sigma * eps).mean(0)) / (2 * h)
+    h = 0.002
+    xp, xm = x0.clone(), x0.clone()
+    mc = (_sste_mc_forward(xp + h, 0.05, 0.05, lo, hi)
+          - _sste_mc_forward(xm - h, 0.05, 0.05, lo, hi)) / (2 * h)
     assert torch.allclose(gx, mc, atol=0.25), (gx, mc)
 
-    # shape sanity at small sigma/grid ratio (sigma_u = 0.2): flat mid-step, peaked boundary
-    xs = torch.tensor([0.0, 0.025], requires_grad=True)  # mid-step vs boundary (scale 0.05)
-    ys = _SSTEActQuant.apply(xs, torch.full_like(xs, 0.05), lo, hi, 0.01)
-    ys.sum().backward()
-    assert xs.grad[0] < 0.3 * xs.grad[1], "mid-step must be flatter than the boundary peak"
+    # sigma/Delta = 20: A8 grid with Dust's default sigma, where the old code kept ~14%
+    x = torch.tensor([0.0, 0.0042, -0.0037, 0.0099], requires_grad=True)
+    x0 = x.detach()
+    y = _SSTEActQuant.apply(x, torch.full_like(x, 0.010), -128, 127, 0.2)
+    y.sum().backward()
+    gx = x.grad.clone()
+    xp, xm = x0.clone(), x0.clone()
+    mc = (_sste_mc_forward(xp + 1e-4, 0.010, 0.2, -128, 127)
+          - _sste_mc_forward(xm - 1e-4, 0.010, 0.2, -128, 127)) / (2e-4)
+    ratio = (gx.abs().sum() / mc.abs().sum()).item()
+    assert 0.8 < ratio < 1.25, (
+        f"at sigma/Delta=20 the boundary sum keeps {ratio:.3f} of the true derivative "
+        f"(1.0 expected); analytic {gx.abs().sum():.4f} vs mc {mc.abs().sum():.4f}")
+    # at sigma/Delta = 20 the smoothing is far wider than the grid, so the derivative is
+    # essentially flat at 1 (every point is effectively at a boundary) - not peaked.
+    assert (gx - 1.0).abs().max() < 0.05, (
+        f"the wide-sigma derivative should be ~1 everywhere, got {gx.tolist()}")
+
+
+def test_sste_backward_scale_is_delta_not_one_over_delta():
+    """Guard the 1/Delta factor directly: with a fixed sigma, narrowing the grid (smaller
+    Delta) must NOT inflate the gradient. Before the 2026-11-06 fix the backward returned the
+    derivative of the CODE index, i.e. dQ/dx / Delta, which grew as Delta shrank."""
+    x = torch.tensor([0.0, 0.03, -0.07, 0.21], requires_grad=True)
+    means = []
+    for delta in (0.05, 0.01, 0.002):
+        if x.grad is not None:
+            x.grad = None
+        y = _SSTEActQuant.apply(x, torch.full_like(x, delta), -128, 127, 0.05)
+        y.sum().backward()
+        means.append(x.grad.mean().item())
+    # the smoothed quantizer's average slope is ~1 at any Delta; it must not scale as 1/Delta
+    for m in means:
+        assert 0.5 < m < 1.5, f"mean dQ/dx = {m:.4f} is not the dequantized derivative"
+    assert max(means) / min(means) < 2.0, (
+        f"gradient magnitude varies {max(means)/min(means):.2f}x across Delta - "
+        f"the 1/Delta factor is back: {means}")
 
 
 def test_sste_forward_equals_ste_forward():
+
     torch.manual_seed(1)
     x = torch.randn(64, 128) * 3
     assert torch.equal(ste_act_quantize(x, 4), sste_act_quantize(x, 4, sigma=0.2))
@@ -242,3 +289,24 @@ def test_smoke_bp_sste(tmp_path):
     history = json.loads(result_path.read_text())["history"]
     losses = [rec["train_loss"] for rec in history if "train_loss" in rec]
     assert len(losses) == 3 and all(math.isfinite(l) for l in losses)
+
+
+def test_sste_forward_unchanged_and_smoothed_slope_bounded():
+    """The adaptive width and the Delta factor must not move the forward value (SSTE and STE
+    share it), must stay finite, and must keep dQ/dx in the range the smoothed quantizer can
+    produce (its average slope is 1 at any width; the A4 grid's clamp keeps it near 1)."""
+    torch.manual_seed(0)
+    x = torch.tensor([0.0, 0.03, -0.07, 0.21], requires_grad=True)
+    scale = torch.full_like(x, 0.4)
+    for sigma in (0.05, 0.2, 0.4, 1.6, 6.4):
+        if x.grad is not None:
+            x.grad = None
+        y = _SSTEActQuant.apply(x, scale.clone(), -8, 7, sigma)
+        assert torch.equal(y, torch.clamp(torch.round(x.detach() / 0.4), -8, 7) * 0.4), \
+            "the forward must be the hard-quantized value at every sigma"
+        y.sum().backward()
+        g = x.grad.clone()
+        assert torch.isfinite(g).all() and (g > 0).all(), (sigma, g)
+        assert g.mean() < 3.0, f"sigma={sigma}: mean slope {g.mean():.3f} is above the 1/Delta=2.5 ceiling"
+
+

@@ -2,8 +2,8 @@
 
 Vendored at `third_party/dust/` (MIT; pin in `third_party/dust/UPSTREAM_COMMIT`). Line
 numbers below refer to that commit. Second column facts were verified by two independent
-reads (docs/OPEN_QUESTIONS.md items 13–17). Upstream is never edited; all our behaviour
-lives in `dustq/`.
+reads (internal log items 13–17). Upstream is never edited; all our behaviour lives in
+`dustq/`.
 
 ## Entry points
 

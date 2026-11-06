@@ -84,11 +84,12 @@ dust-q/
 │   ├── test_phase0.py      # Core unit tests (bitwise parity, sizes, quantizers)
 │   ├── test_t1.py          # Exact resume, queue idempotency, benchmark smoke
 │   └── test_cuda.py        # GPU-only single-step sanity tests
-├── docs/                   # Scientific specifications & planning
+├── docs/                   # Scientific specifications, plan and gate evidence
 │   ├── planning/           # Dust-Q Implementation Plan v3.1 (canonical)
 │   ├── HYPOTHESES.md       # Pre-registered hypotheses and evaluation endpoints
 │   ├── REPO_MAP.md         # Upstream architectural mapping and design notes
-│   └── reports/            # Milestone verification reports (T0, T1, review fixes)
+│   ├── related_work.md     # Literature landscape, positioning, watch deltas
+│   └── reports/            # Gate verification reports (T0-T1, T3-T6)
 └── third_party/dust/       # Pinned upstream Q Labs Dust repository
 ```
 
@@ -225,8 +226,10 @@ Detailed documentation and research logs are tracked in `docs/`:
 - [**Implementation Plan v3.1**](docs/planning/Dust-Q%20Implementation%20Plan%20v3.md): The canonical design plan, cost model, and gate definitions.
 - [**Pre-registered Hypotheses**](docs/HYPOTHESES.md): Primary and secondary endpoints, paired-seed bootstrap methodology, and early exit criteria.
 - [**Upstream Repository Map**](docs/REPO_MAP.md): Detailed line-by-line mapping against upstream Q Labs `dust.py`.
-- [**Open Questions & Tracking**](docs/OPEN_QUESTIONS.md): Active tracking of experimental and theoretical questions.
-- [**Findings Log**](docs/FINDINGS.md): **Start here when you want to know what has been found out.** One append-only log of every bug, gate reading, watch result, corrected claim and process lesson, dated and linked to its evidence.
+- [**Related Work & Novelty Scan**](docs/related_work.md): The literature landscape, our positioning, and the watch deltas.
+- [**Gate reports**](docs/reports/): Verification evidence for G0 (T0/T1/T3), G1 (T4), the quantization implementation and its performance (T5), and the probe suite (T6).
+
+> Internal working notes — the open-questions log, findings log, watch-surveillance reports, planning drafts and compute-budget bookkeeping — are deliberately not part of this repository.
 
 ---
 

@@ -124,20 +124,27 @@ else:
 # keeps the verified exact path for the ablation.
 DUST_FORWARD = "fake"
 
-# ---- 1. S probes per precision (probe 3 first on P3 — the H2 gate) ----
-for run_id in S_PCKPTS:
-    which = "3,2,5,0" if "w1p58a4" in run_id else "3,2"
+# ---- 1. P3 FIRST, and the G2a arms before the expensive sweep ----
+# G2a's criterion (Plan v3.1 section 5) is at P3: cos(Dust-1k, ref) RISES with K on MLP
+# and writer layers, plus a negative directional descent along Dust-1k. So the ladder
+# (probe 2) and the descent (probe 4) are the gate; the sigma-Delta sweep (probe 5) is
+# the mechanism analysis and the most expensive step. Running the gate arms first - each
+# in its own subprocess, each saving its own JSON - means a late failure costs only the
+# mechanism data, not the gate reading. That is what cost half of G2a on 2026-11-02.
+P3 = "L4d256_1M_w1p58a4_backprop_K0_s0"
+for run_id, which in [(P3, "3,2,0"), (P3, "4"), (P3, "5")]:
+    print(f"\n=== P3 probes {run_id} (probes {which}, forward={DUST_FORWARD}) ===", flush=True)
+    run_checked([PY, "-m", "dustq.probes", "--config", f"configs/{run_id}.yaml",
+                 "--probes", which, "--dust-forward", DUST_FORWARD])
+
+# ---- 2. the remaining precisions: cross-precision comparison for the paper ----
+for run_id in [r for r in S_PCKPTS if r != P3]:
+    which = "3,2"
     print(f"\n=== S probes {run_id} (probes {which}, forward={DUST_FORWARD}) ===", flush=True)
     run_checked([PY, "-m", "dustq.probes", "--config", f"configs/{run_id}.yaml",
                  "--probes", which, "--dust-forward", DUST_FORWARD])
 
-# ---- 2. directional descent on S at P3 (cheap, method-neutral arbiter) ----
-print("\n=== S directional descent (P3) ===", flush=True)
-run_checked([PY, "-m", "dustq.probes", "--config",
-             "configs/L4d256_1M_w1p58a4_backprop_K0_s0.yaml", "--probes", "4",
-             "--dust-forward", DUST_FORWARD])
-
-# ---- 3. M spot-check at P3 (ladders only, unless the budget is comfortable) ----
+# ---- 3. M spot-check at P3 (ladders + sweep, if the budget is comfortable) ----
 if os.environ.get("M_SPOT", "1") == "1":
     print("\n=== M spot-check (ladders + sweep) ===", flush=True)
     run_checked([PY, "-m", "dustq.probes", "--config", f"configs/{M_P3}.yaml",
@@ -146,3 +153,5 @@ if os.environ.get("M_SPOT", "1") == "1":
 print(f"\nprobe session complete: {(time.monotonic() - T0) / 3600:.2f} h "
       "— copy results/probes/*.json back, plus the G1 loss rows and the "
       "seed-noise floor printed above")
+print("G2a check (P3): ladder must RISE with K on 'MLP in'/'MLP out'/'Attn out', and "
+      "directional descent 'Dust256'/'Dust1k' train+val must be negative", flush=True)

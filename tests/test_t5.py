@@ -310,3 +310,65 @@ def test_sste_forward_unchanged_and_smoothed_slope_bounded():
         assert g.mean() < 3.0, f"sigma={sigma}: mean slope {g.mean():.3f} is above the 1/Delta=2.5 ceiling"
 
 
+
+
+# ---------- 2026-11-08 audit regressions ----------
+
+def test_group_of_covers_value_embedding_sites():
+    """ve_gate and value_embeds used to fall through to their raw parameter names, which
+    (a) made any script filtering on canonical groups silently drop them and (b) changed the
+    group count, hence the median reliability and every disattenuated number."""
+    from dustq.probes import SITE_GROUPS, group_of
+
+    for name, expected in [
+        ("transformer.h.0.attn.ve_gate.weight", SITE_GROUPS["attn.ve_gate"]),
+        ("transformer.h.3.attn.ve_gate.weight", SITE_GROUPS["attn.ve_gate"]),
+        ("value_embeds.1.weight", SITE_GROUPS["value_embeds"]),
+        ("value_embeds.3.weight", SITE_GROUPS["value_embeds"]),
+        # the eight original groups must be unchanged
+        ("transformer.h.0.attn.c_q.weight", "Q"),
+        ("transformer.h.1.attn.c_proj.weight", "Attn out"),
+        ("transformer.h.0.mlp.c_fc.weight", "MLP in"),
+        ("transformer.h.2.mlp.c_proj.weight", "MLP out"),
+        ("transformer.wte.weight", "Tok emb"),
+        ("lm_head.weight", "Head"),
+    ]:
+        assert group_of(name) == expected, (name, group_of(name), expected)
+
+
+def test_mse_alpha_scale_is_floored():
+    """mse_alpha had no clamp (absmax and the weight path both clamp at 1e-5), so a token with
+    all-zero activations produced scale = 0 and 0/0 = NaN - and in the SSTE backward,
+    sigma_u = inf, an unbounded boundary loop."""
+    import math
+
+    from dustq.quant import ste_act_quantize
+
+    x = torch.zeros(4, 16)
+    y = ste_act_quantize(x, 4, scheme="mse_alpha", alpha=0.5)
+    assert torch.isfinite(y).all(), f"mse_alpha produced non-finite output: {y}"
+    # a floor also means a tiny-but-nonzero activation still quantizes to a finite code
+    x2 = torch.full((4, 16), 1e-12)
+    y2 = ste_act_quantize(x2, 4, scheme="mse_alpha", alpha=0.5)
+    assert torch.isfinite(y2).all(), f"tiny activations produced non-finite output: {y2}"
+
+
+def test_tf32_int_matmul_restores_previous_flag():
+    """_tf32_int_matmuls used to set allow_tf32 = False unconditionally in `finally`, which on
+    Ampere/Ada/Hopper (where PyTorch defaults it to True) permanently disabled TF32 for the
+    rest of the process - a silent global slowdown. See docs/REMEDIATION-2026-11-08.md R8."""
+    import dustq.quant as quant_mod
+
+    prior = torch.backends.cuda.matmul.allow_tf32
+    try:
+        a = torch.randint(-8, 8, (8, 8)).float()
+        b = torch.randint(-8, 8, (8, 8)).float()
+        for value in (True, False):
+            torch.backends.cuda.matmul.allow_tf32 = value
+            out = quant_mod._tf32_int_matmuls(a, b)
+            assert torch.backends.cuda.matmul.allow_tf32 == value, (
+                f"the helper clobbered allow_tf32 (was {value}, now "
+                f"{torch.backends.cuda.matmul.allow_tf32})")
+            assert torch.equal(out, a @ b)
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = prior

@@ -38,13 +38,25 @@ SITE_GROUPS = {
     "attn.c_q": "Q", "attn.c_k": "K", "attn.c_v": "V",
     "attn.c_proj": "Attn out", "mlp.c_fc": "MLP in", "mlp.c_proj": "MLP out",
     "transformer.wte": "Tok emb", "lm_head": "Head",
+    # attention value-embedding internals. Before 2026-11-08 these fell through to their raw
+    # parameter names ("transformer.h.1.attn.ve_gate.weight"), which (a) made every script
+    # that filters on canonical groups silently drop them and (b) changed the number of
+    # groups, hence the median `reliability` and every disattenuated number.
+    "attn.ve_gate": "VE gate",
+    "value_embeds": "Value emb",
 }
+# value_embeds is a top-level module indexed by layer (`value_embeds.{i}`), so it is a PREFIX
+# of the parameter path where every other site is a suffix - group_of handles it separately.
+_PREFIX_GROUPS = {"value_embeds": SITE_GROUPS["value_embeds"]}
 
 
 def group_of(param_name: str) -> str:
     """Map a parameter name to its layer-type group (Plan v3.1 section 5). Parameter
     names carry a trailing `.weight`, so match against the module path with it stripped."""
     base = param_name[:-len(".weight")] if param_name.endswith(".weight") else param_name
+    for prefix, name in _PREFIX_GROUPS.items():
+        if base == prefix or base.startswith(prefix + "."):
+            return name
     for key, name in SITE_GROUPS.items():
         if base == key or base.endswith("." + key):
             return name

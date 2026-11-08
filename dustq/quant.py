@@ -51,7 +51,7 @@ def ste_act_quantize(x: torch.Tensor, bits: int, unsigned: bool = False,
     elif scheme == "mse_alpha":
         if alpha is None:
             raise ValueError("mse_alpha scheme requires an explicit alpha (calibrated in T5)")
-        scale = alpha * x.detach().abs().mean(dim=-1, keepdim=True)
+        scale = alpha * x.detach().abs().mean(dim=-1, keepdim=True).clamp(min=1e-5)
     else:
         raise ValueError(f"unknown activation scheme {scheme!r}")
     return ste_quantize(x, scale, lo, hi)
@@ -222,7 +222,7 @@ def sste_act_quantize(x: torch.Tensor, bits: int, unsigned: bool = False,
     elif scheme == "mse_alpha":
         if alpha is None:
             raise ValueError("mse_alpha scheme requires an explicit alpha (calibrated in T5)")
-        scale = alpha * x.detach().abs().mean(dim=-1, keepdim=True)
+        scale = alpha * x.detach().abs().mean(dim=-1, keepdim=True).clamp(min=1e-5)
     else:
         raise ValueError(f"unknown activation scheme {scheme!r}")
     return _SSTEActQuant.apply(x, scale, lo, hi, sigma)
@@ -231,22 +231,29 @@ def sste_act_quantize(x: torch.Tensor, bits: int, unsigned: bool = False,
 def _tf32_int_matmuls(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """a @ b with TF32 enabled, for small-integer fp32 inputs: TF32 keeps 11 significant
     bits, so |code| <= 256 is exact; products <= 2^16 are exact in fp32 accumulation for
-    any realistic contraction dim. Restores the previous matmul precision setting after."""
-    try:
-        torch.backends.cuda.matmul.allow_tf32 = True
-    except Exception:
+    any realistic contraction dim. Restores the previous matmul precision setting after.
+
+    The restore must save and restore, not reset: PyTorch enables allow_tf32 by default on
+    Ampere/Ada/Hopper, so the old unconditional `allow_tf32 = False` in `finally` permanently
+    disabled TF32 for every later op in the process - a silent global slowdown, found by the
+    2026-11-08 audit."""
+    keys = ("allow_tf32", "fp32_precision")
+    saved = {}
+    for k in keys:
         try:
-            torch.backends.cuda.matmul.fp32_precision = "tf32"  # torch >= 2.9 naming
+            saved[k] = torch.backends.cuda.matmul.__getattr__(k)
         except Exception:
             pass
     try:
+        try:
+            torch.backends.cuda.matmul.allow_tf32 = True
+        except Exception:
+            torch.backends.cuda.matmul.fp32_precision = "tf32"  # torch >= 2.9 naming
         return a @ b
     finally:
-        try:
-            torch.backends.cuda.matmul.allow_tf32 = False
-        except Exception:
+        for k, v in saved.items():
             try:
-                torch.backends.cuda.matmul.fp32_precision = "ieee"
+                torch.backends.cuda.matmul.__setattr__(k, v)
             except Exception:
                 pass
 

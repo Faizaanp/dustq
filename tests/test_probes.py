@@ -259,8 +259,8 @@ def test_probes_cli_main_end_to_end(tmp_path, monkeypatch):
         "--probes", "3,2,5,0", "--out", str(tmp_path / "probes")])
     probes.main()
 
-    path = tmp_path / "probes" / f"{cfg.run_id}_probes.json"
-    assert path.is_file(), "main() must write its report JSON"
+    path = tmp_path / "probes" / f"{cfg.run_id}_probes_0-2-3-5.json"
+    assert path.is_file(), f"main() must write its report JSON at {path}"
     report = json.loads(path.read_text())
     assert {"seed_noise", "reliability", "cosine_ladders", "ste_bias", "sigma_delta"} <= set(report)
     assert report["reliability"] == 0.99

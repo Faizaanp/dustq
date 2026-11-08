@@ -67,7 +67,11 @@ def quant_mse(x: torch.Tensor, bits: int, unsigned: bool, alpha: float) -> float
         lo, hi = 0, 2 ** bits - 1
     else:
         lo, hi = -(2 ** (bits - 1)), 2 ** (bits - 1) - 1
-    scale = alpha * x.abs().mean(dim=-1, keepdim=True)
+    # clamp: a token whose activations are all zero (padding, dead ReLU^2) would give
+    # scale = 0 and then 0/0 = NaN, poisoning the whole calibration search. The production
+    # quantizers in dustq/quant.py clamp at the same floor, so matching it here keeps the
+    # calibration objective and the runtime quantizer consistent.
+    scale = (alpha * x.abs().mean(dim=-1, keepdim=True)).clamp(min=1e-5)
     codes = torch.clamp(torch.round(x / scale), lo, hi)
     err = codes * scale - x
     return (err ** 2).mean().item()

@@ -132,14 +132,16 @@ DUST_FORWARD = "fake"
 # in its own subprocess, each saving its own JSON - means a late failure costs only the
 # mechanism data, not the gate reading. That is what cost half of G2a on 2026-11-02.
 P3 = "L4d256_1M_w1p58a4_backprop_K0_s0"
-STEPS = [(P3, "3,2,0"), (P3, "4")]                        # G2a gate arms + seed floor
-# P1/P2 only need probe 3 back: their ladders are already on Drive, but every SSTE column
-# from 2026-11-06 was computed by the pre-fix backward (the 1/Delta + truncation bugs) and
-# is invalid. P0 needs nothing re-run: at precision=fp no act hooks register, so its SSTE and
-# STE forwards are identical (the data confirms it to 7 digits).
-STEPS += [(r, "3") for r in S_PCKPTS if r != P3 and "fp" not in r]
-if os.environ.get("M_SPOT", "0") == "1":
-    STEPS.append((M_P3, "5"))     # M's ladder is on Drive; only its sweep is outstanding
+# All five checkpoints, every probe. Deliberately NOT the "re-probe matrix": the five bugs
+# fixed in R1-R4 all change the BASIS of a measurement (reference convention, group set,
+# flip-rate definition, descent normalisation), so a matrix would mix pre- and post-fix
+# numbers in the same comparison. One uniform session gives one internally consistent set.
+# The pre-fix JSONs stay on Drive as the audit-trail cohort and nothing new is compared
+# to them. P0's probe 3 is the one redundancy (at fp there is no activation grid, so SSTE
+# is bit-identical to STE) and costs ~2 min, so it stays for uniformity.
+STEPS = [(P3, "3,2,0"), (P3, "4"), (P3, "5")]
+STEPS += [(r, "3,2") for r in S_PCKPTS if r != P3]      # P0, P2, P1
+STEPS.append((M_P3, "2,5"))
 
 PROBE_DIR = Path("results/probes")
 

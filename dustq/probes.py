@@ -293,20 +293,33 @@ def probe_seed_noise(ctx, seeds=(0, 1), populations=(256, 1024)) -> dict:
     return out
 
 
-def probe_cosine_ladders(ctx, populations=(256, 1024, 4096), reference=None) -> dict:
+def probe_cosine_ladders(ctx, populations=(256, 1024, 4096), reference=None,
+                         reliability: float | None = None) -> dict:
     """Probe 2: cos(Dust-K, ref) per layer type vs K. Reports BOTH the raw cosine and the
     disattenuated one (raw / halves-reliability) per the reporting precedent
     arXiv:2609.19589 (WATCH 2026-11-01B): state what you divided out. Returns
-    {population: {group: {"raw": c, "disattenuated": min(1, c/reliability)}}}."""
+    {population: {group: {"raw": c, "disattenuated": min(1, c/reliability)}}}.
+
+    `reliability` is the median per-group cosine between the reference's two halves. It is
+    only computed here when the caller did not already have it (which costs another
+    K=4096 pair). Passing it is not cosmetic: the CLI used to leave it at 1.0, so every
+    "disattenuated" number in the shipped JSONs equalled the raw one while the JSON also
+    reported a reliability of 0.29-0.38 - i.e. the field looked applied and was not."""
     if reference is None:
-        _, reference, reliability = probe_reference(ctx)
-    else:
+        _, reference, computed = probe_reference(ctx)
+        if reliability is None:
+            reliability = computed
+    elif reliability is None:
         reliability = 1.0
     out = {}
     for k in populations:
         g = ctx.dust_grads(seed=0, population=k)
         per_group = cosine_by_group(g, reference)
-        out[k] = {gname: {"raw": c, "disattenuated": min(1.0, c / reliability)}
+        out[k] = {gname: {"raw": c,
+                          # clamp BOTH ends: a cosine outside [-1, 1] is meaningless, and the
+                          # old min(1, ...) left negative values unbounded (-1.45 appeared in
+                          # the M data, where reliability is only 0.08)
+                          "disattenuated": max(-1.0, min(1.0, c / reliability))}
                   for gname, c in per_group.items()}
     return out
 
@@ -560,8 +573,9 @@ def main():
 
     if 2 in which:
         print("probe 2: cosine ladders", flush=True)
-        ladders = probe_cosine_ladders(ctx, reference=ref)
+        ladders = probe_cosine_ladders(ctx, reference=ref, reliability=reliability)
         report["cosine_ladders"] = {str(k): v for k, v in ladders.items()}
+        report["disattenuation_applied"] = reliability
         save()
         print(json.dumps(report["cosine_ladders"], indent=1))
 

@@ -270,3 +270,28 @@ def test_probes_cli_main_end_to_end(tmp_path, monkeypatch):
     assert all(-1.001 <= v <= 1.001 for groups in sd["cos"].values() for v in groups.values())
     for groups in sd["flip_rate"].values():
         assert all(0.0 <= v <= 1.0 for v in groups.values()), groups
+
+
+def test_ladders_use_the_reliability_they_are_given(ctx):
+    """Regression for the 2026-11-07 fix: the CLI computed a reference reliability (0.29-0.38
+    on the real checkpoints) and then called probe_cosine_ladders WITHOUT passing it, so the
+    function defaulted to 1.0 and every shipped "disattenuated" value equalled the raw cosine
+    while the same JSON reported the real reliability. Fast by design - a backprop reference,
+    one population, and a synthetic reliability - so it needs no K=4096 estimator steps."""
+    ctx_local = ProbeContext(ctx.cfg, batch=(ctx.x, ctx.y), heldout=(ctx.vx, ctx.vy))
+    ref = ctx_local.bp_grads("identity")
+    lad = probe_cosine_ladders(ctx_local, populations=(256,), reference=ref, reliability=0.5)
+    assert set(lad) == {256}
+    for groups in lad.values():
+        assert groups, "no groups reported"
+        for name, val in groups.items():
+            expected = max(-1.0, min(1.0, val["raw"] / 0.5))
+            assert abs(val["disattenuated"] - expected) < 1e-12, (name, val)
+            assert -1.0 <= val["disattenuated"] <= 1.0, (name, val)
+
+    # and the default must stay 1.0 when no reliability is supplied (unchanged behaviour)
+    lad_default = probe_cosine_ladders(ctx_local, populations=(256,), reference=ref)
+    for groups in lad_default.values():
+        for val in groups.values():
+            assert val["disattenuated"] == val["raw"], (
+                "omitting reliability must keep the old 1.0 default, not invent one")

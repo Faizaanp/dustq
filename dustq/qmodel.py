@@ -185,6 +185,12 @@ def register_act_hooks(model: nn.Module, bits: int, scheme: str = "absmax",
                 x = args[0]
                 if not x.is_floating_point():
                     return args
+                # Stash the PRE-quantization input too. Pre-hooks chain, so any hook
+                # registered after this one sees the quantized value, not the raw one -
+                # which made probe 5's flip rate a bin-centred artifact (measured 2026-11-08:
+                # the spy saw x == codes*scale exactly, so every activation sat at its bin
+                # centre instead of a continuous offset in [-0.5, +0.5] of a code).
+                module._act_raw = x.detach()
                 # Stash codes + scale for QLinear's exact path (identical values to the
                 # dequantized input: same formulas, deterministic).
                 if unsigned:

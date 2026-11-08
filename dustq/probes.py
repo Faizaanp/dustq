@@ -233,20 +233,32 @@ class ProbeContext:
 
 # ---------- the five probes ----------
 
-def probe_reference(ctx, k_total: int = 16384) -> tuple[dict, dict, float]:
+def probe_reference(ctx, k_total: int = 16384) -> tuple[dict, dict, dict]:
     """Probe 1: Dust gradient at K=16k split into two independent halves at the largest
     recipe-preset population <= half (100k-token demos needs recipe presets: upstream
-    `recipe()` only accepts {256, 1024, 4096, 16384}); returns (g1, g2, reliability)
-    where reliability = median per-group cosine between halves (disattenuation)."""
-    import bisect
+    `recipe()` only accepts {256, 1024, 4096, 16384}).
+
+    Returns (ref, r_g, meta):
+      ref = (g1 + g2) / 2 - the AVERAGED reference, a genuine K=8192 estimate. Before
+        2026-11-08 this returned g2 alone and callers discarded g1, so the "K=16384
+        reference" was a single K=4096 draw and the ladder's K=4096 row recomputed g1
+        bit-for-bit (verified: `reliability` equalled the median group's K=4096 raw cosine
+        to 16 dp in every shipped JSON).
+      r_g = cos(g1, g2) PER GROUP - the split-half correlation of ONE half, the input the
+        stepped-up Spearman-Brown r_ref = 2*r_g/(1+r_g) needs.
+      meta = {"half", "r_g_median", "n_groups"} for the record.
+
+    Per-group, not a median: one scalar reliability applied to every group is what clamped
+    high-SNR groups to 1.000 while near-zero groups set the divisor."""
     half = k_total // 2
     # largest preset <= half (fallback: largest supported)
     half = max(p for p in (256, 1024, 4096) if p <= half) if any(p <= half for p in (256, 1024, 4096)) else 1024
     g1 = ctx.dust_grads(seed=0, population=half)
     g2 = ctx.dust_grads(seed=5000, population=half)
-    rel = sorted(cosine_by_group(g1, g2).values())
-    reliability = rel[len(rel) // 2]  # median across groups
-    return g1, g2, reliability
+    r_g = cosine_by_group(g1, g2)
+    ref = {name: (g1[name] + g2[name]) / 2.0 for name in g1}
+    med = sorted(r_g.values())
+    return ref, r_g, {"half": half, "r_g_median": med[len(med) // 2], "n_groups": len(r_g)}
 
 
 def probe_averaging_test(ctx, ns=(256, 1024, 4096), trials: int = 5, seed: int = 0) -> dict:
@@ -305,34 +317,53 @@ def probe_seed_noise(ctx, seeds=(0, 1), populations=(256, 1024)) -> dict:
     return out
 
 
-def probe_cosine_ladders(ctx, populations=(256, 1024, 4096), reference=None,
-                         reliability: float | None = None) -> dict:
-    """Probe 2: cos(Dust-K, ref) per layer type vs K. Reports BOTH the raw cosine and the
-    disattenuated one (raw / halves-reliability) per the reporting precedent
-    arXiv:2609.19589 (WATCH 2026-11-01B): state what you divided out. Returns
-    {population: {group: {"raw": c, "disattenuated": min(1, c/reliability)}}}.
+def _spearman_brown_sqrt(r_g: float) -> float | None:
+    """Spearman-Brown stepped-up reliability for the MEAN of two parallel measurements, then
+    square-rooted to give the reference's correlation with the true signal:
 
-    `reliability` is the median per-group cosine between the reference's two halves. It is
-    only computed here when the caller did not already have it (which costs another
-    K=4096 pair). Passing it is not cosmetic: the CLI used to leave it at 1.0, so every
-    "disattenuated" number in the shipped JSONs equalled the raw one while the JSON also
-    reported a reliability of 0.29-0.38 - i.e. the field looked applied and was not."""
+        r_ref = 2*r_g / (1 + r_g)      (reliability of the averaged reference)
+        corr(ref, truth) = sqrt(r_ref) (what a measured cosine is attenuated by)
+
+    This is the disattenuation DIVISOR. The pre-2026-11-08 code divided by r_g itself, which
+    divides the reference's noise out twice and under-corrects the signal by
+    1/sqrt(r_ref). Returns None when r_g <= 0: the halves are uncorrelated or
+    anti-correlated, disattenuation is mathematically undefined, and dividing by an epsilon
+    would fabricate a number."""
+    if r_g is None or r_g <= 0:
+        return None
+    r_ref = 2.0 * r_g / (1.0 + r_g)
+    return math.sqrt(r_ref)
+
+
+def probe_cosine_ladders(ctx, populations=(256, 1024, 4096), reference=None,
+                         r_g: dict | None = None) -> dict:
+    """Probe 2: cos(Dust-K, ref) per layer type vs K. Reports BOTH the raw cosine and the
+    disattenuated one per the reporting precedent arXiv:2609.19589 (WATCH 2026-11-01B):
+    state what you divided out. Returns
+    {population: {group: {"raw": c, "disattenuated": v, "r_g": ..., "divisor": ...}}}.
+
+    The divisor is sqrt(spearman_brown(r_g)) per group (see _spearman_brown_sqrt); it is
+    computed here only when the caller does not already have r_g, which costs another
+    reference pair. `disattenuated` is None for groups where r_g <= 0 - undefined, not a
+    number - and is clamped to [-1, 1] everywhere else (a cosine cannot leave that range;
+    the old min(1, ...) left negatives unbounded, and -1.45 appeared in the M data)."""
     if reference is None:
-        _, reference, computed = probe_reference(ctx)
-        if reliability is None:
-            reliability = computed
-    elif reliability is None:
-        reliability = 1.0
+        reference, r_g, _meta = probe_reference(ctx)
+    elif r_g is None:
+        r_g = {}
     out = {}
     for k in populations:
         g = ctx.dust_grads(seed=0, population=k)
         per_group = cosine_by_group(g, reference)
-        out[k] = {gname: {"raw": c,
-                          # clamp BOTH ends: a cosine outside [-1, 1] is meaningless, and the
-                          # old min(1, ...) left negative values unbounded (-1.45 appeared in
-                          # the M data, where reliability is only 0.08)
-                          "disattenuated": max(-1.0, min(1.0, c / reliability))}
-                  for gname, c in per_group.items()}
+        row = {}
+        for gname, c in per_group.items():
+            divisor = _spearman_brown_sqrt(r_g.get(gname))
+            dis = None if divisor is None else max(-1.0, min(1.0, c / divisor))
+            row[gname] = {"raw": c, "disattenuated": dis,
+                          "r_g": r_g.get(gname),
+                          "divisor": None if divisor is None else round(divisor, 6)}
+        out[k] = row
+    return out
     return out
 
 
@@ -341,7 +372,7 @@ def probe_ste_bias(ctx, reference=None) -> dict:
     gate on H2: if cos(STE, ref) already equals cos(fp-BP, fp-ref) at the primary bit
     width, STE bias is not the mechanism and Tier B re-decides its budget."""
     if reference is None:
-        _, reference, _ = probe_reference(ctx)
+        reference, _r_g, _meta = probe_reference(ctx)
     ste = ctx.bp_grads(ste_mode="identity")
     sste = ctx.bp_grads(ste_mode="smoothed")
     return {
@@ -379,20 +410,26 @@ def probe_directional_descent(ctx, candidates: dict, grid: int = 12) -> dict:
         flat = torch.cat([g for g in grads.values()])
         norm = flat.norm().item()
 
-        def ev(eps, direction=grads, batch=ctx.x, target=ctx.y, which="train"):
+        def ev(eps, direction=grads, batch=ctx.x, target=ctx.y, which="train", total=norm):
             with torch.no_grad():
                 backup = [p.detach().clone() for p in ctx.model.parameters()]
                 for (pname, param) in list(ctx.model.named_parameters()):
                     if pname in direction and eps:
-                        param.add_(direction[pname].reshape(param.shape).to(param.device) * (-eps / max(direction[pname].norm().item(), 1e-12)))
+                        # GLOBAL norm: step every tensor by eps toward -d/||d||, where ||d||
+                        # is the norm of the whole concatenated direction. Before 2026-11-08
+                        # each tensor was divided by its OWN norm, perturbing 4-element
+                        # lambda vectors by the same L2 distance as 4096x256 matrices and
+                        # rotating the direction being tested.
+                        param.add_(direction[pname].reshape(param.shape).to(param.device)
+                                   * (-eps / max(total, 1e-12)))
                 value = ctx.quantized_losses(batch, target).mean().item()
                 for p, b in zip(ctx.model.parameters(), backup):
                     p.copy_(b)
             return value - (base_train if which == "train" else base_val)
 
         results[name] = {
-            "train": directional_descent(lambda e: ev(e, which="train")),
-            "val": directional_descent(lambda e: ev(e, which="val")),
+            "train": directional_descent(lambda e: ev(e, which="train"), steps=grid),
+            "val": directional_descent(lambda e: ev(e, which="val"), steps=grid),
             "norm": norm,
         }
     return results
@@ -458,23 +495,26 @@ def probe_sigma_delta(ctx, reference, sigma_fractions=(1 / 8, 1 / 4, 1 / 2, 1, 2
     ctx._ensure_hooks("identity")  # the spies must attach AFTER the act-quant pre-hooks
     _, bits, _ = qmodel.parse_precision(ctx.cfg.precision)
 
-    # Spy pre-hooks (chained after the act hooks, so they see the quantized input) capture
-    # the clean codes, the per-token scale and a bounded slice of the raw input per site.
+    # Spy pre-hooks capture the PRE-quantization input (`module._act_raw`, stashed by the
+    # act hook itself) plus the clean codes and per-token scale. Reading args[0] instead was
+    # the pre-2026-11-08 bug: pre-hooks chain, so the spy saw codes*scale exactly, every
+    # activation sat at its bin centre, and the flip rate was an artificial dead zone.
     clean: dict[str, dict] = {}
 
     def spy(name):
         def hook(module, args):
-            if getattr(module, "_act_codes", None) is None:
+            raw = getattr(module, "_act_raw", None)
+            if raw is None or getattr(module, "_act_codes", None) is None:
                 return None
-            x = args[0]
-            if x.is_floating_point():
-                # two sequences only: flips need a bounded sample, and this keeps the big
-                # tensors off the GPU for the whole sweep
-                clean[name] = {
-                    "input": x.detach()[:2].clone(),
-                    "codes": module._act_codes.detach()[:2].clone(),
-                    "scale": module._act_scale.detach().clone(),
-                }
+            if not raw.is_floating_point():
+                return None
+            # two sequences only: flips need a bounded sample, and this keeps the big
+            # tensors off the GPU for the whole sweep
+            clean[name] = {
+                "input": raw[:2].clone(),
+                "codes": module._act_codes.detach()[:2].clone(),
+                "scale": module._act_scale.detach().clone(),
+            }
             return None
         return hook
 
@@ -500,8 +540,12 @@ def probe_sigma_delta(ctx, reference, sigma_fractions=(1 / 8, 1 / 4, 1 / 2, 1, 2
     delta = {k: sum(v) / len(v) for k, v in sorted(per_key.items())}
 
     def flip_rates(sigmas: dict) -> dict:
-        """Fraction of clean activation codes that one Dust-scale draw moves, per group."""
-        rates = {}
+        """Fraction of clean activation codes that one Dust-scale draw moves, per group.
+
+        Accumulated per group across blocks, then averaged: the pre-2026-11-08 version
+        assigned `rates[group] = <last block's mean>`, so a 4-layer model reported only
+        block 3 and `hub_shallow` (blocks 0-1) was silently dropped."""
+        rates: dict[str, list[float]] = {}
         for name, data in clean.items():
             key = qmodel.site_sigma_key(name, n_layer)
             sigma = sigmas.get(key)
@@ -516,8 +560,9 @@ def probe_sigma_delta(ctx, reference, sigma_fractions=(1 / 8, 1 / 4, 1 / 2, 1, 2
             noise = torch.randn(x.shape, generator=torch.Generator().manual_seed(7))
             noise = noise.to(x.device, x.dtype).mul_(sigma)
             moved = (torch.clamp(torch.round((x + noise) / scale), lo, hi) != codes)
-            rates[group_of(name + ".weight")] = float(moved.float().mean().item())
-        return {g: rates[g] for g in sorted(rates)}
+            rates.setdefault(group_of(name + ".weight"), []).append(
+                float(moved.float().mean().item()))
+        return {g: sum(v) / len(v) for g, v in sorted(rates.items())}
 
     out = {}
     for frac in sigma_fractions:
@@ -576,18 +621,28 @@ def main():
             print(f"seed-noise floor: mean {sum(flat) / len(flat):.4f}, "
                   f"min {min(flat):.4f} — compare with the G1 bf16-vs-fp32 mean (+0.9910)", flush=True)
 
-    ref, reliability = None, 1.0
+    ref, r_g, ref_meta = None, {}, {}
     if which & {1, 2, 3, 5}:
-        _, ref, reliability = probe_reference(ctx)
-        report["reliability"] = reliability
+        ref, r_g, ref_meta = probe_reference(ctx)
+        report["reliability_by_group"] = r_g
+        report["reference_meta"] = ref_meta
         save()
-        print(f"probe 1: reference K=16384 halves -> reliability {reliability:.4f}", flush=True)
+        med = ref_meta.get("r_g_median")
+        print(f"probe 1: reference = mean of two K={ref_meta.get('half')} halves; "
+              f"median split-half r_g {med if med is not None else float('nan'):.4f} "
+              f"over {ref_meta.get('n_groups')} groups", flush=True)
 
     if 2 in which:
         print("probe 2: cosine ladders", flush=True)
-        ladders = probe_cosine_ladders(ctx, reference=ref, reliability=reliability)
+        ladders = probe_cosine_ladders(ctx, reference=ref, r_g=r_g)
         report["cosine_ladders"] = {str(k): v for k, v in ladders.items()}
-        report["disattenuation_applied"] = reliability
+        # state what was divided out, per group (arXiv:2609.19589 reporting precedent)
+        report["disattenuation"] = {
+            "divisor": "sqrt(spearman_brown(r_g)) per group",
+            "by_group": {g: round(v, 6) for g, v in
+                         ((g, _spearman_brown_sqrt(r_g.get(g))) for g in r_g) if v is not None},
+            "undefined_groups": [g for g in r_g if _spearman_brown_sqrt(r_g[g]) is None],
+        }
         save()
         print(json.dumps(report["cosine_ladders"], indent=1))
 

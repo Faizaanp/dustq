@@ -3,13 +3,15 @@
 steps of backprop fp on the tiny model via the Runner, save to a tmp dir)."""
 
 import json
+import math
 from pathlib import Path
 
 import pytest
 import torch
 
 from dustq.config import RunConfig
-from dustq.probes import (ProbeContext, cosine_by_group, fit_cos_law, probe_cosine_ladders,
+from dustq.probes import (ProbeContext, _spearman_brown_sqrt, cosine_by_group, fit_cos_law,
+                          probe_cosine_ladders,
                           probe_directional_descent, probe_reference, probe_seed_noise,
                           probe_sigma_delta, probe_ste_bias)
 
@@ -51,7 +53,7 @@ def test_collect_and_cosine_helpers(ctx):
 
 
 def test_reference_and_ladders(ctx):
-    _, ref, rel = probe_reference(ctx)
+    ref, rel, _meta = probe_reference(ctx)
     assert -1.0 <= rel <= 1.0
     lad = probe_cosine_ladders(ctx, populations=(256, 1024), reference=ref)
     assert set(lad) == {256, 1024}
@@ -63,14 +65,14 @@ def test_reference_and_ladders(ctx):
 
 
 def test_ste_bias_probe(ctx):
-    _, ref, _ = probe_reference(ctx)
+    ref, _r_g, _meta = probe_reference(ctx)
     bias = probe_ste_bias(ctx, reference=ref)
     assert set(bias["ste"]) == set(bias["sste"])
     assert all(-1.001 <= v <= 1.001 for v in bias["ste"].values())
 
 
 def test_sigma_delta_probe(ctx):
-    _, ref, _ = probe_reference(ctx)
+    ref, _r_g, _meta = probe_reference(ctx)
     sweep = probe_sigma_delta(ctx, ref, sigma_fractions=(1, 2), populations=(256,))
     assert len(sweep) == 2
 
@@ -253,7 +255,9 @@ def test_probes_cli_main_end_to_end(tmp_path, monkeypatch):
     yaml_path.write_text(yaml.safe_dump(cfg.to_yaml_dict()), encoding="utf-8")
 
     cheap_ref = probes.ProbeContext(cfg).bp_grads("identity")
-    monkeypatch.setattr(probes, "probe_reference", lambda *a, **k: (None, cheap_ref, 0.99))
+    cheap_r_g = {g: 0.25 for g in probes.cosine_by_group(cheap_ref, cheap_ref)}
+    monkeypatch.setattr(probes, "probe_reference",
+                        lambda *a, **k: (cheap_ref, cheap_r_g, {"half": 4096}))
     monkeypatch.setattr(sys, "argv", [
         "dustq.probes", "--config", str(yaml_path),
         "--probes", "3,2,5,0", "--out", str(tmp_path / "probes")])
@@ -262,8 +266,8 @@ def test_probes_cli_main_end_to_end(tmp_path, monkeypatch):
     path = tmp_path / "probes" / f"{cfg.run_id}_probes_0-2-3-5.json"
     assert path.is_file(), f"main() must write its report JSON at {path}"
     report = json.loads(path.read_text())
-    assert {"seed_noise", "reliability", "cosine_ladders", "ste_bias", "sigma_delta"} <= set(report)
-    assert report["reliability"] == 0.99
+    assert {"seed_noise", "reference_meta", "cosine_ladders", "ste_bias", "sigma_delta"} <= set(report)
+    assert report["reference_meta"]["half"] == 4096
     sd = report["sigma_delta"]
     assert sd["cos"] and sd["flip_rate"] and sd["sigma"], \
         "the sweep must report cos, flip rate and sigma (the crash here lost all of it)"
@@ -272,26 +276,48 @@ def test_probes_cli_main_end_to_end(tmp_path, monkeypatch):
         assert all(0.0 <= v <= 1.0 for v in groups.values()), groups
 
 
-def test_ladders_use_the_reliability_they_are_given(ctx):
-    """Regression for the 2026-11-07 fix: the CLI computed a reference reliability (0.29-0.38
-    on the real checkpoints) and then called probe_cosine_ladders WITHOUT passing it, so the
-    function defaulted to 1.0 and every shipped "disattenuated" value equalled the raw cosine
-    while the same JSON reported the real reliability. Fast by design - a backprop reference,
-    one population, and a synthetic reliability - so it needs no K=4096 estimator steps."""
+def test_ladders_disattenuate_by_spearman_brown_sqrt(ctx):
+    """The disattenuation DIVISOR must be sqrt(spearman_brown(r_g)) per group, and r_g <= 0
+    must yield None rather than a division by an epsilon.
+
+    Two distinct historical bugs are pinned here: (a) the raw cosine was divided by r_g
+    itself, which divides the reference's noise out twice and under-corrects the signal by
+    1/sqrt(r_ref); (b) the CLI never passed the reliability at all, so the field equalled the
+    raw value while the JSON separately reported a real one. Fast by design - a backprop
+    reference, one population and a synthetic r_g, so no K=4096 estimator steps."""
     ctx_local = ProbeContext(ctx.cfg, batch=(ctx.x, ctx.y), heldout=(ctx.vx, ctx.vy))
     ref = ctx_local.bp_grads("identity")
-    lad = probe_cosine_ladders(ctx_local, populations=(256,), reference=ref, reliability=0.5)
+    groups = cosine_by_group(ref, ref)
+    r_g = {g: 0.25 for g in groups}
+    r_g["K"] = -0.01                      # the undefined case
+    lad = probe_cosine_ladders(ctx_local, populations=(256,), reference=ref, r_g=r_g)
     assert set(lad) == {256}
-    for groups in lad.values():
-        assert groups, "no groups reported"
-        for name, val in groups.items():
-            expected = max(-1.0, min(1.0, val["raw"] / 0.5))
-            assert abs(val["disattenuated"] - expected) < 1e-12, (name, val)
-            assert -1.0 <= val["disattenuated"] <= 1.0, (name, val)
+    for row in lad.values():
+        assert set(row) == set(groups), (set(row), set(groups))
+        for name, val in row.items():
+            assert -1.0 <= val["raw"] <= 1.0
+            if name == "K":            # r_g <= 0: undefined, NOT divided by eps
+                assert val["r_g"] == -0.01
+                assert val["disattenuated"] is None, (name, val)
+                assert val["divisor"] is None
+            else:                      # r_g = 0.25 -> r_ref = 0.4 -> divisor = sqrt(0.4)
+                expected = max(-1.0, min(1.0, val["raw"] / math.sqrt(0.4)))
+                assert abs(val["disattenuated"] - expected) < 1e-12, (name, val)
+                assert abs(val["divisor"] - math.sqrt(0.4)) < 1e-6, (name, val)
 
-    # and the default must stay 1.0 when no reliability is supplied (unchanged behaviour)
-    lad_default = probe_cosine_ladders(ctx_local, populations=(256,), reference=ref)
-    for groups in lad_default.values():
-        for val in groups.values():
-            assert val["disattenuated"] == val["raw"], (
-                "omitting reliability must keep the old 1.0 default, not invent one")
+    # a group with no r_g entry at all is undefined too, not divided by an epsilon
+    partial = {g: v for g, v in r_g.items() if g != "K"}
+    lad2 = probe_cosine_ladders(ctx_local, populations=(256,), reference=ref, r_g=partial)
+    assert lad2[256]["K"]["disattenuated"] is None, "a missing r_g must not become /eps"
+
+
+def test_spearman_brown_edges():
+    """sqrt(2r/(1+r)): monotone in r, 0 at r=0, and None (not a number) for r<=0."""
+    from dustq.probes import _spearman_brown_sqrt
+
+    assert _spearman_brown_sqrt(-0.5) is None
+    assert _spearman_brown_sqrt(0.0) is None
+    assert _spearman_brown_sqrt(None) is None
+    assert abs(_spearman_brown_sqrt(1.0) - 1.0) < 1e-12          # perfect halves
+    assert 0 < _spearman_brown_sqrt(0.05) < _spearman_brown_sqrt(0.25) < \
+        _spearman_brown_sqrt(0.9) < 1.0

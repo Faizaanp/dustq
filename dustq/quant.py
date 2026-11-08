@@ -80,9 +80,12 @@ class QLinear(nn.Linear):
         self._codes = None
         self._gamma = None
         self._codes_version = -1
-        # Activation-code stash set by the act-quant pre-hook (DUST exact path):
+        # Activation stashes set by the act-quant pre-hook (DUST exact path + probe 5):
+        # codes/scale for the exact matmul, `raw` for the pre-quantization input that any
+        # later pre-hook can no longer see (pre-hooks see the previous hook's output).
         self._act_codes = None
         self._act_scale = None
+        self._act_raw = None
         # Exact integer-code path is DUST-only (set by qmodel.set_exact_path): BP-STE
         # and BP-SSTE keep the same fake-quant forward in train and eval by design.
         self._exact_path = False
@@ -140,9 +143,11 @@ class QLinear(nn.Linear):
             y = self._exact_forward(x)
             self._act_codes = None
             self._act_scale = None
+            self._act_raw = None
             return y
         self._act_codes = None
         self._act_scale = None
+        self._act_raw = None
         return F.linear(x, self.effective_weight(), self.bias)
 
 

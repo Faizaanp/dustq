@@ -43,13 +43,18 @@ Two edge cases that must be handled explicitly rather than by a floor:
 - **per-group, not one global scalar.** A single median reliability applied to every group is
   what clamped high-SNR groups to 1.000 in the first place (see R1c above).
 
+**Status: IMPLEMENTED** (`dustq/probes.py`, `probe_reference` now returns the averaged
+`(g1+g2)/2` reference, per-group `r_g`, and meta; `probe_cosine_ladders` divides by
+`sqrt(spearman_brown(r_g))` per group and returns `None` for undefined groups). Locked in by
+`test_ladders_disattenuate_by_spearman_brown_sqrt` and `test_spearman_brown_edges`.
+
 ⚠️ **Do not "fix" this by dividing by `r_g`** — that is the current bug. Dividing by the
 *stepped-up* reliability by mistake divides the noise out twice *and* still under-corrects the
 signal by `1/sqrt(r_ref)`. The correction and the divisor must be the same object.
 **Also:** state in `docs/reports/T6.md` that pre-fix JSONs used a single-half reference and an
 `r` divisor, so old numbers are not comparable — same cohort discipline as the hook-order fix.
 
-### R2. `probe_sigma_delta` flip rate is a bin-centred artifact — VERIFIED
+### R2. `probe_sigma_delta` flip rate is a bin-centred artifact — VERIFIED, IMPLEMENTED
 
 `_ensure_hooks("identity")` registers the act-quant hook *before* the spy, so the spy's
 `args[0]` is already `codes * scale`. Measured: `max |x - codes*scale| = 0.0` and
@@ -65,7 +70,7 @@ monotone table built on it.
 that. Re-run probe 5 after the fix — the whole σ–Δ story (including "the mechanism is now
 measured") needs re-deriving from continuous inputs.
 
-### R3. Layer overwrite in `flip_rates` — VERIFIED (by inspection)
+### R3. Layer overwrite in `flip_rates` — VERIFIED, IMPLEMENTED
 
 `rates[group_of(name + ".weight")] = ...` overwrites on every block, so only the last block
 is reported and `hub_shallow` (blocks 0–1 of 4) is silently dropped. With n_layer=4 that
@@ -73,7 +78,7 @@ discards half the layers.
 
 **Fix:** accumulate a list per group and average at the end, not assign.
 
-### R4. `probe_directional_descent` normalises per tensor — VERIFIED
+### R4. `probe_directional_descent` normalises per tensor — VERIFIED, IMPLEMENTED
 
 `ev()` divides each parameter by its *own* tensor norm instead of the global `‖d‖`, so
 `resid_lambdas`/`x0_lambdas` (4 elements) are perturbed by the same L2 distance as the
@@ -84,7 +89,7 @@ as measured is weaker than reported.
 `-eps * d_p / ‖d‖`. Also pass `grid` through to `directional_descent(..., steps=grid)` (the
 parameter is accepted and dropped).
 
-### R5. `calibrate_alpha.py` pools "per-token" scales globally — VERIFIED
+### R5. `calibrate_alpha.py` pools "per-token" scales globally — VERIFIED (clamp FIXED, reshape still OPEN)
 
 Line 47 does `args[0].detach().float().flatten()`, then line 70 computes
 `alpha * x.abs().mean(dim=-1)` on a 1-D vector → one global scalar across all sites, layers
@@ -99,7 +104,7 @@ and as `ste_act_quantize`/`sste_act_quantize` now do, see R12): an all-zero toke
 (cheap, Colab-only) and re-freeze `configs/alpha_calibrated.json`; every A4/A2 number
 downstream depends on it — and note the floor means the calibration objective itself changes.
 
-### R6. P1 (`w8a8`) SSTE collapse was never reported; "directions survive" is wrong — VERIFIED
+### R6. P1 (`w8a8`) SSTE collapse was never reported; "directions survive" is wrong — VERIFIED, DOCS REWRITE STILL OPEN
 
 The P1 JSON's `sste` column is collapsed (`Attn out 0.041`, `MLP in 0.070`, `resid -0.698`,
 `x0 -0.772`) exactly like P2's. T6/FINDINGS report only P2. The reassuring claim "probe
@@ -111,7 +116,7 @@ product and rotates the gradient.
 in FINDINGS; re-probe P1 and P2 after R8 (already scheduled) and treat every pre-`7dddfb9`
 SSTE column as void.
 
-### R7. `test_probes_cli_main_end_to_end` asserts the pre-fix filename — VERIFICATION RUNNING
+### R7. `test_probes_cli_main_end_to_end` asserts the pre-fix filename — VERIFIED, FIXED
 
 The test checks `<run_id>_probes.json`; `probes.main` now writes `<run_id>_probes_<tag>.json`.
 Will show as a false failure once the suite completes.
@@ -122,7 +127,7 @@ Will show as a false failure once the suite completes.
 
 ## P1 — will silently corrupt Tier B / T7
 
-### R8. `QLinear._exact_forward` runs inside active bf16 autocast — HIGH, UNVERIFIED on GPU
+### R8. `QLinear._exact_forward` runs inside active bf16 autocast — HIGH, UNVERIFIED on GPU (R8b clobber FIXED)
 
 Reported mechanism: `DUST.losses`, `evaluate` and `quantized_losses` all run inside
 `torch.autocast("cuda", bfloat16)`, and `aten::matmul` is on the bf16 cast list, so
@@ -170,7 +175,7 @@ models take the fake path unless `dust_forward="fake"`.
 **Fix:** honour `cfg.dtype` on both methods; make the eval forward path explicit rather than
 inherited from `_exact_path`.
 
-### R12. `mse_alpha` scale has no floor; SSTE half-width unbounded — VERIFIED (by inspection)
+### R12. `mse_alpha` scale has no floor; SSTE half-width unbounded — VERIFIED, FLOOR FIXED (half-width cap still OPEN)
 
 `mse_alpha` lacks the `clamp(min=1e-5)` that `absmax` has, so an all-zero ReLU² token gives
 `0/0`. And `half = ceil(4·σ_u)` uses the batch *max* σ_u, so one tiny-scale token can set a
@@ -278,3 +283,34 @@ do not scrub unilaterally.**
 Size: R7, R21 are minutes. R1–R4, R12 are a few hours plus a re-run. R5 is one Colab session.
 R8 needs the L4 to reproduce. R20 is irreversible history surgery — last, and only with the
 owner's say-so.
+
+## Implementation status (2026-11-08, end of session)
+
+## Implementation status (2026-11-08, end of session)
+
+**Implemented and unit-tested:**
+- **R1** — `probe_reference` returns the averaged `(g1+g2)/2` reference plus **per-group**
+  `r_g` and meta; `probe_cosine_ladders` divides by `sqrt(spearman_brown(r_g))` and returns
+  `None` for undefined groups (`test_ladders_disattenuate_by_spearman_brown_sqrt`,
+  `test_spearman_brown_edges`).
+- **R2** — the act hook now stashes `module._act_raw` (the pre-quantization input), which the
+  spy reads instead of `args[0]`. The flip rate is no longer a bin-centred artifact. **The
+  reported flip-rate numbers change**; T6's "sub-¼Δ moves essentially no A4 codes" is
+  retracted until re-measured.
+- **R3** — `flip_rates` accumulates per group across blocks and averages; no more last-block
+  overwrite, so `hub_shallow` is no longer dropped.
+- **R4** — directional descent steps by the **global** direction norm (`-eps * d_p / ‖d‖`) and
+  passes `grid` through to the line search. G2a arm 2 must be re-measured.
+- **R7** — the CLI e2e test asserts the correct tagged filename (`_probes_0-2-3-5.json`).
+- **R5b / R12** — `.clamp(min=1e-5)` on the `mse_alpha` scale in `ste_act_quantize`,
+  `sste_act_quantize` and `calibrate_alpha.quant_mse`.
+- **R8b** — `_tf32_int_matmuls` saves and restores `allow_tf32`/`fp32_precision` instead of
+  resetting them to `False`.
+- **R22** — `ve_gate` / `value_embeds` are mapped to named groups (prefix rule for
+  `value_embeds.{i}`).
+
+**Still open:** R5's per-site reshape, R12's half-width cap, R6's honest rewrite of the SSTE
+record, R8's autocast reproduction on the L4, R9–R13, R14–R22.
+
+**Re-probe required before any number above is quoted:** the whole matrix below, because R1,
+R2, R3, R4 and the group-count change all alter the reported values.

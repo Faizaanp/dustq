@@ -53,15 +53,25 @@ def test_collect_and_cosine_helpers(ctx):
 
 
 def test_reference_and_ladders(ctx):
-    ref, rel, _meta = probe_reference(ctx)
-    assert -1.0 <= rel <= 1.0
-    lad = probe_cosine_ladders(ctx, populations=(256, 1024), reference=ref)
+    ref, r_g, meta = probe_reference(ctx)
+    # ref is the AVERAGE of the two halves (a genuine 2x-K estimate); r_g is per-group
+    assert ref and isinstance(r_g, dict) and r_g
+    assert all(-1.0 <= v <= 1.0 for v in r_g.values()), r_g
+    assert meta["half"] in (256, 1024, 4096, 8192) and meta["n_groups"] == len(r_g)
+    lad = probe_cosine_ladders(ctx, populations=(256, 1024), reference=ref, r_g=r_g)
     assert set(lad) == {256, 1024}
-    # reporting precedent (arXiv:2609.19589): raw and disattenuated both present
+    # reporting precedent (arXiv:2609.19589): raw, disattenuated, r_g and the divisor are
+    # all present; r_g <= 0 means undefined (None), never divided by an epsilon
     for population, groups in lad.items():
         for name, val in groups.items():
-            assert set(val) == {"raw", "disattenuated"}
-            assert val["disattenuated"] >= val["raw"] - 1e-6
+            assert set(val) == {"raw", "disattenuated", "r_g", "divisor"}
+            assert -1.0 <= val["raw"] <= 1.0
+            if val["r_g"] is None or val["r_g"] <= 0:
+                assert val["disattenuated"] is None and val["divisor"] is None, val
+            else:
+                d = math.sqrt(2 * val["r_g"] / (1 + val["r_g"]))
+                assert abs(val["divisor"] - d) < 1e-6, (name, val)
+                assert -1.0 <= val["disattenuated"] <= 1.0
 
 
 def test_ste_bias_probe(ctx):
@@ -260,10 +270,16 @@ def test_probes_cli_main_end_to_end(tmp_path, monkeypatch):
                         lambda *a, **k: (cheap_ref, cheap_r_g, {"half": 4096}))
     monkeypatch.setattr(sys, "argv", [
         "dustq.probes", "--config", str(yaml_path),
-        "--probes", "3,2,5,0", "--out", str(tmp_path / "probes")])
+        # probes 3,2,0 covers the reference, the ladder (with the new per-group
+        # disattenuation metadata), the STE bias and the seed floor - everything main()'s
+        # reporting and save-per-probe paths touch. The 16-point sigma-Delta sweep is
+        # excluded: it costs ~40 min of CPU for coverage test_sigma_delta_sweep already
+        # provides, and a slow test that never finishes is worse than a fast one that does.
+        "--probes", "3,2,0", "--out", str(tmp_path / "probes")])
     probes.main()
 
-    path = tmp_path / "probes" / f"{cfg.run_id}_probes_0-2-3-5.json"
+    tag = "-".join(str(p) for p in sorted(int(p) for p in "3,2,0".split(",")))
+    path = tmp_path / "probes" / f"{cfg.run_id}_probes_{tag}.json"
     assert path.is_file(), f"main() must write its report JSON at {path}"
     report = json.loads(path.read_text())
     assert {"seed_noise", "reference_meta", "cosine_ladders", "ste_bias", "sigma_delta"} <= set(report)

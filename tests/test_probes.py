@@ -282,14 +282,21 @@ def test_probes_cli_main_end_to_end(tmp_path, monkeypatch):
     path = tmp_path / "probes" / f"{cfg.run_id}_probes_{tag}.json"
     assert path.is_file(), f"main() must write its report JSON at {path}"
     report = json.loads(path.read_text())
-    assert {"seed_noise", "reference_meta", "cosine_ladders", "ste_bias", "sigma_delta"} <= set(report)
+    # probes 3,2,0 produce exactly these sections; probe 5 (sigma_delta) is deliberately
+    # excluded from this test - test_sigma_delta_sweep covers it far more cheaply
+    expected = {"seed_noise", "reference_meta", "reliability_by_group",
+                "cosine_ladders", "disattenuation", "ste_bias"}
+    assert expected <= set(report), (expected, sorted(report))
+    assert "sigma_delta" not in report, "probe 5 was excluded from this test"
     assert report["reference_meta"]["half"] == 4096
-    sd = report["sigma_delta"]
-    assert sd["cos"] and sd["flip_rate"] and sd["sigma"], \
-        "the sweep must report cos, flip rate and sigma (the crash here lost all of it)"
-    assert all(-1.001 <= v <= 1.001 for groups in sd["cos"].values() for v in groups.values())
-    for groups in sd["flip_rate"].values():
-        assert all(0.0 <= v <= 1.0 for v in groups.values()), groups
+    # the disattenuation metadata must state what was divided out, per group
+    dis = report["disattenuation"]
+    assert dis["divisor"] == "sqrt(spearman_brown(r_g)) per group"
+    assert dis["by_group"] and isinstance(dis["undefined_groups"], list)
+    # and every ladder row must carry the new r_g / divisor fields
+    for row in report["cosine_ladders"].values():
+        for val in row.values():
+            assert set(val) == {"raw", "disattenuated", "r_g", "divisor"}, val
 
 
 def test_ladders_disattenuate_by_spearman_brown_sqrt(ctx):

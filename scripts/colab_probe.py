@@ -1,14 +1,21 @@
 """Dust-Q T6 probe session on Colab L4 — paste into ONE cell and run.
 
-Requires: fresh dustq.zip; L4 runtime; Drive data at MyDrive/dustq/data (present).
-Runs, in order (Plan v3.1 section 5):
-  1. The STE/SSTE-bias probe (probe 3) FIRST per plan — the cheap H2 gate. If cos(STE, ref)
-     at P3 is already at the fp level, H2 is unlikely and Tier B re-decides before spending.
-  2. Probes 2 + 1 (cosine ladders, disattenuated) and 5 (sigma-Delta sweep) per precision.
-  3. Probe 4 (directional descent) on S at P3 (the primary bit width).
-  4. An M spot-check at P3 (ladders + a 3-point sweep) only if the L4 fraction is used.
-Outputs: results/probes/<run_id>_probes.json plus printed tables; copy the JSON back.
-Expected ~2.5-3.5 h, ~5 CU. The residual alpha table is regenerated if missing.
+Requires: a FRESH dustq.zip (rebuild it after every commit: `git archive -o dustq.zip HEAD`),
+an L4 runtime, and Drive data at MyDrive/dustq/data.
+
+Runs, in order:
+  P3 (w1p58a4, the gate precision): probes 3,2,0 then 4 then 5 — each its own subprocess so
+      a late failure costs only the mechanism data, not the gate reading.
+  P0 (fp), P2 (w1.58a8), P1 (w8a8): probes 3,2 — the cross-precision comparison for the paper.
+  M (L8d512, w1.58a4): probes 2,5 — the layers spot-check.
+
+Outputs: results/probes/<run_id>_probes_<tag>.json, one per (checkpoint, probe-set), also
+written to Drive. Completed steps are SKIPPED on re-run, so a disconnected session resumes
+rather than restarting. Expected ~3 h, ~5-6 CU at the owner-observed 1.94 CU/h.
+
+After the 2026-11-08 audit fixes (R1-R4), nothing from an earlier JSON is comparable: the
+reference convention, the group set, the flip-rate basis and the descent normalisation all
+changed. This session produces the first internally consistent set.
 """
 
 import os
@@ -124,24 +131,23 @@ else:
 # keeps the verified exact path for the ablation.
 DUST_FORWARD = "fake"
 
-# ---- 1. P3 FIRST, and the G2a arms before the expensive sweep ----
-# G2a's criterion (Plan v3.1 section 5) is at P3: cos(Dust-1k, ref) RISES with K on MLP
-# and writer layers, plus a negative directional descent along Dust-1k. So the ladder
-# (probe 2) and the descent (probe 4) are the gate; the sigma-Delta sweep (probe 5) is
-# the mechanism analysis and the most expensive step. Running the gate arms first - each
-# in its own subprocess, each saving its own JSON - means a late failure costs only the
-# mechanism data, not the gate reading. That is what cost half of G2a on 2026-11-02.
+# ---- the run plan ----
+# P3 is the G2a gate precision, and its gate arms (probe 2's ladder, probe 4's descent) run
+# before the expensive sigma-Delta sweep, each as its own subprocess saving its own JSON -
+# so a late failure costs only the mechanism data, not the gate reading. That ordering is
+# what cost half of G2a on 2026-11-02.
 P3 = "L4d256_1M_w1p58a4_backprop_K0_s0"
-# All five checkpoints, every probe. Deliberately NOT the "re-probe matrix": the five bugs
-# fixed in R1-R4 all change the BASIS of a measurement (reference convention, group set,
-# flip-rate definition, descent normalisation), so a matrix would mix pre- and post-fix
-# numbers in the same comparison. One uniform session gives one internally consistent set.
-# The pre-fix JSONs stay on Drive as the audit-trail cohort and nothing new is compared
-# to them. P0's probe 3 is the one redundancy (at fp there is no activation grid, so SSTE
-# is bit-identical to STE) and costs ~2 min, so it stays for uniformity.
+
+# All five checkpoints, every probe. Deliberately NOT the "re-probe matrix": the R1-R4 fixes
+# each change the BASIS of a measurement (reference convention, group set, flip-rate basis,
+# descent normalisation), so a matrix would mix pre- and post-fix numbers in one comparison.
+# One uniform session gives one internally consistent set; the pre-fix JSONs stay on Drive as
+# the audit-trail cohort and nothing new is compared to them. P0's probe 3 is the one
+# redundancy (at fp there is no activation grid, so SSTE is bit-identical to STE) and costs
+# about two minutes, so it stays for uniformity.
 STEPS = [(P3, "3,2,0"), (P3, "4"), (P3, "5")]
 STEPS += [(r, "3,2") for r in S_PCKPTS if r != P3]      # P0, P2, P1
-STEPS.append((M_P3, "2,5"))
+STEPS.append((M_P3, "2,5"))                            # M
 
 PROBE_DIR = Path("results/probes")
 
@@ -175,6 +181,23 @@ skipped = len(STEPS) - len(todo)
 print(f"\nprobe session complete: {(time.monotonic() - T0) / 3600:.2f} h "
       f"({len(todo)} run, {skipped} skipped as already done)")
 
-# ---- 3. M spot-check at P3 (ladders + sweep, if the budget is comfortable) ----
-
-
+# ---- what to read when it finishes ----
+# G2a's criterion (Plan v3.1 section 5) is P3-internal and has two arms:
+#   arm 1: cos(Dust-K, ref) RISES with K on 'MLP in', 'MLP out' and 'Attn out'
+#          (the writer/hub groups), read from the 'cosine_ladders' section
+#   arm 2: directional descent along Dust-1k is NEGATIVE on both train and val,
+#          read from the 'directional_descent' section ('Dust1k' entry)
+# The disattenuated column divides by sqrt(spearman_brown(r_g)) PER GROUP and is None
+# wherever r_g <= 0 (undefined, not a number); the JSON's 'disattenuation' records both.
+# NOTHING from a pre-2026-11-08 JSON is comparable to this run: the reference convention,
+# the group set, the flip-rate basis and the descent normalisation all changed.
+print("""
+=== reading the results ===
+  arm 1  ladder must RISE with K on 'MLP in'/'MLP out'/'Attn out'   (cosine_ladders)
+  arm 2  'Dust1k' train+val descent must be NEGATIVE                (directional_descent)
+  also   seed-noise floor per group (probe 0) - the variance baseline the attention-
+         internal cosines must be judged against
+         sigma-Delta per-group cosines (probe 5) - already show q/k/v are sigma-INSENSITIVE
+         while the writer groups peak at ~1x Delta
+""", flush=True)
+print("copy results/probes/*_probes_*.json back - they are also saved on Drive", flush=True)

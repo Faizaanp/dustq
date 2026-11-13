@@ -477,7 +477,8 @@ mode cannot do — HTTP 500 since 2026-10-31) returns **one** paper citing Dust:
 **arXiv:2610.33826v2** "Reactive Optimizers" (Bai, Liang, Teoh, Sitzmann; v1 2026-10-24,
 v2 2026-11-04) [paper, full LaTeX HTML read]. Its bibliography carries the Dust report URL
 verbatim; Dust appears **only in the reference list** (3 occurrences, zero body mentions), and a
-keyword scan for `quantiz|int8|ternary|low-bit|1.58` over the whole paper returns no hits. So:
+keyword scan for `quantiz|int8|ternary|low-bit|1.58` over the whole paper returns no hits.
+  **CORRECTION 2026-11-13** (WATCH/2026-11-13): "only in the reference list" is **wrong** — a direct re-read of the same v2 HTML found one body-text mention in the Conclusion, keyed "(Dahal et al., 2026)" with no "Dust" string, which the 11-06 Dust-string count could not see. No v3; the paper did not change, our reading did. The quant-keyword scan (0 hits) stands. Corrected wording: **one arXiv citing paper, one passing body-text mention + bibliography entry, no citing paper in our cell.** So:
 **one bibliography-only citation, in a paper outside our cell.** `STATUS-2026-11-01.md`'s flat
 "Dust still uncited" is corrected in place with a dated note; OPEN_QUESTIONS #41 carries the
 corrected wording and the standing gate. The gate is **not** closed: Semantic Scholar (5th
@@ -534,3 +535,37 @@ Google Scholar JS challenge (new); arXiv Atom `full_text` mode HTTP 500 (known-b
 around via the classic endpoint — note the two endpoints differ in corpus coverage, so a
 full-text negative is slightly weaker than it looks). Springer/OpenReview/ACL Anthology were out
 of scope and not attempted. No claim above rests on an unfetched item.
+
+### Watch 2026-11-13 additions (verdict **WATCH**; full report at docs/reports/WATCH/2026-11-13.md)
+
+Seventh run. **No arXiv work occupies our cell** — `abs:"activation perturbation" AND
+abs:"quantization"` still returns 0, and the ZO×quantization count is unchanged at 43 with
+TerMeZO (2026-09-27) still the newest ML entry.
+
+- **Citation correction (owed by the audit-trail rule):** the sole arXiv citing paper,
+  `arXiv:2610.33826v2`, is **not bibliography-only** — it carries one body-text mention in its
+  Conclusion, keyed "(Dahal et al., 2026)" with no "Dust" string. The 2026-11-06 check keyed
+  on the "Dust" string and could not see it; no v3 exists, so the paper did not change, our
+  reading did. Corrected wording above, placed next to the original. The quant-keyword scan
+  (0 hits) is unaffected.
+- **Name-keyed channels still blocked, and now demonstrably load-bearing:** Semantic Scholar
+  429 on the sixth consecutive attempt; Google Scholar JS challenge for the second. The one
+  body mention was surfaced only by an author-name full-text query — exactly the class of
+  citation the manual S2/Scholar check exists to catch. Gate remains OPEN and is now higher
+  priority, not lower.
+- **Noise benchmark:** 54 PRs (one new, #58, OPEN not merged — Track-2 3.4948 in 14.22 s, zero
+  quantization keywords). Record tables unchanged. `quant-int8-relay` byte-frozen at
+  `fdaca52`, 0 forks, no second implementation. JacQuant still v1 (charter quotation valid);
+  the Dust authors' scaling paper still v1.
+- **New adjacent items, none in our cell** [paper]: PENSA `2611.10648` (BitNet b1.58 FPGA
+  inference hardware); AdaIE `2611.04006` (Yequan Zhao cluster, no ZO/quantization). Version
+  drift only: FuRA v2, PACZero v3, `2610.29720` v2.
+- **Watch-level flag (rules boundary, not quantization):** Noise PR #58 assigns credit to an
+  unmeasured intermediate block by interpolating between its measured neighbours — adjacent to
+  the no-backprop clause's "credit can't be chained block by block" and to the PR #20 ruling.
+  No maintainer comment yet; re-check how #58 is adjudicated, since it sharpens what
+  "forward-only credit" means on the venue we cite as the live ZO-pretraining frontier.
+- **Watch hygiene:** the 11th `qlabs-eng` full-text hit is unidentified (paging failed twice)
+  [unverified]; the Discussions listing rendered GitHub's error blankslate (unreadable, not
+  empty); and future citing-paper checks must grep the AUTHOR NAME, not just the "Dust"
+  string — that is how the body mention above was missed.

@@ -18,12 +18,40 @@ from .train import Runner
 
 
 def _append_csv_row(csv_path: Path, row: dict):
-    new_file = not csv_path.exists()
-    with csv_path.open("a", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=CSV_COLUMNS, extrasaction="ignore")
-        if new_file:
+    if not csv_path.exists() or csv_path.stat().st_size == 0:
+        with csv_path.open("w", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=CSV_COLUMNS, extrasaction="ignore")
             writer.writeheader()
-        writer.writerow(row)
+            writer.writerow(row)
+        return
+
+    # Check existing header for backwards compatibility
+    with csv_path.open("r", newline="") as stream:
+        reader = csv.reader(stream)
+        header = next(reader, None)
+
+    if header is not None and header != CSV_COLUMNS:
+        # Legacy schema detected: migrate existing rows gracefully
+        with csv_path.open("r", newline="") as stream:
+            dict_reader = csv.DictReader(stream)
+            existing_rows = list(dict_reader)
+        bak = csv_path.with_suffix(".csv.bak")
+        if not bak.exists():
+            bak.write_bytes(csv_path.read_bytes())
+        tmp = csv_path.with_suffix(".csv.tmp")
+        with tmp.open("w", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=CSV_COLUMNS, extrasaction="ignore")
+            writer.writeheader()
+            for r in existing_rows:
+                r.setdefault("ste_mode", "identity")
+                r.setdefault("dust_forward", "tf32")
+                writer.writerow(r)
+            writer.writerow(row)
+        tmp.replace(csv_path)
+    else:
+        with csv_path.open("a", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=CSV_COLUMNS, extrasaction="ignore")
+            writer.writerow(row)
 
 
 def _row_from(cfg: RunConfig, result: dict, status: str, notes: str = "") -> dict:

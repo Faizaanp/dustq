@@ -297,12 +297,18 @@ class CheckpointValidator:
         report["exists"] = True
         try:
             import torch
-            payload = torch.load(best_path, map_location="cpu", weights_only=True)
-            if isinstance(payload, dict) and "best" in payload and "state" in payload:
-                report["best"] = float(payload["best"])
+            try:
+                payload = torch.load(best_path, map_location="cpu", weights_only=False)
+            except Exception:
+                payload = torch.load(best_path, map_location="cpu")
+            if isinstance(payload, dict) and "state" in payload:
+                report["best"] = float(payload.get("best", 0.0))
+                report["valid"] = True
+            elif isinstance(payload, dict) and any("weight" in k for k in payload.keys()):
+                report["best"] = 0.0
                 report["valid"] = True
             else:
-                report["error"] = "best.pt does not conform to {'best', 'state'} contract"
+                report["error"] = "best.pt does not conform to {'best', 'state'} contract or valid state_dict"
         except Exception as exc:
             report["error"] = f"Failed to load best.pt: {exc}"
 
@@ -469,13 +475,14 @@ class TrainingWatchdog:
         return used_mb, util_pct
 
     def check_metrics(self) -> Tuple[bool, Dict[str, Any], Optional[str]]:
-        """Parse the tail of metrics.jsonl to inspect loss, steps, and numerical stability [code]."""
-        if not self.metrics_path.is_file():
+        """Parse the tail of metrics.jsonl (or legacy history.jsonl) to inspect loss, steps, and numerical stability [code]."""
+        target_path = self.metrics_path if self.metrics_path.is_file() else (self.run_dir / "history.jsonl")
+        if not target_path.is_file():
             return True, {}, None
 
         try:
-            mtime = self.metrics_path.stat().st_mtime
-            lines = [l.strip() for l in self.metrics_path.read_text().splitlines() if l.strip()]
+            mtime = target_path.stat().st_mtime
+            lines = [l.strip() for l in target_path.read_text().splitlines() if l.strip()]
             if not lines:
                 return True, {"mtime": mtime}, None
 

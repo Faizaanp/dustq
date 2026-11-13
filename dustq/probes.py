@@ -256,7 +256,9 @@ def probe_reference(ctx, k_total: int = 16384) -> tuple[dict, dict, dict]:
     half = k_total // 2
     # largest preset <= half (fallback: largest supported)
     half = max(p for p in (256, 1024, 4096) if p <= half) if any(p <= half for p in (256, 1024, 4096)) else 1024
+    print(f"  [probe 1] computing reference half 1 (seed=0, K={half})...", flush=True)
     g1 = ctx.dust_grads(seed=0, population=half)
+    print(f"  [probe 1] computing reference half 2 (seed=5000, K={half})...", flush=True)
     g2 = ctx.dust_grads(seed=5000, population=half)
     r_g = cosine_by_group(g1, g2)
     ref = {name: (g1[name] + g2[name]) / 2.0 for name in g1}
@@ -314,6 +316,7 @@ def probe_seed_noise(ctx, seeds=(0, 1), populations=(256, 1024)) -> dict:
     below that, the two dtypes are indistinguishable at this K."""
     out = {}
     for k in populations:
+        print(f"  [probe 0] seed_noise computing K={k}...", flush=True)
         g0 = ctx.dust_grads(seed=seeds[0], population=k)
         g1 = ctx.dust_grads(seed=seeds[-1], population=k)
         out[str(k)] = cosine_by_group(g0, g1)
@@ -356,6 +359,7 @@ def probe_cosine_ladders(ctx, populations=(256, 1024, 4096), reference=None,
         r_g = {}
     out = {}
     for k in populations:
+        print(f"  [probe 2] cosine_ladders computing K={k}...", flush=True)
         g = ctx.dust_grads(seed=0, population=k)
         per_group = cosine_by_group(g, reference)
         row = {}
@@ -375,7 +379,9 @@ def probe_ste_bias(ctx, reference=None) -> dict:
     width, STE bias is not the mechanism and Tier B re-decides its budget."""
     if reference is None:
         reference, _r_g, _meta = probe_reference(ctx)
+    print("  [probe 3] computing STE backward...", flush=True)
     ste = ctx.bp_grads(ste_mode="identity")
+    print("  [probe 3] computing SSTE backward...", flush=True)
     sste = ctx.bp_grads(ste_mode="smoothed")
     return {
         "ste": cosine_by_group(ste, reference),
@@ -411,6 +417,7 @@ def probe_directional_descent(ctx, candidates: dict, grid: int = 12) -> dict:
     for name, grads in candidates.items():
         if not grads:
             continue
+        print(f"  [probe 4] directional_descent evaluating candidate {name}...", flush=True)
         flat = torch.cat([g for g in grads.values()])
         norm = flat.norm().item()
         # Persistent backup snapshot allocated once per direction candidate
@@ -569,10 +576,11 @@ def probe_sigma_delta(ctx, reference, sigma_fractions=(1 / 8, 1 / 4, 1 / 2, 1, 2
         return {g: sum(v) / len(v) for g, v in sorted(rates.items())}
 
     out = {}
-    for frac in sigma_fractions:
+    for frac_idx, frac in enumerate(sigma_fractions, start=1):
         sigmas = {k: frac * d for k, d in delta.items()}
         flips = flip_rates(sigmas)
         for k in populations:
+            print(f"  [probe 5] sigma_delta step [{frac_idx}/{len(sigma_fractions)}]: frac={frac:.3f}x Delta, K={k}...", flush=True)
             g = ctx.dust_grads(seed=0, population=k, sigmas=sigmas)
             out[(frac, k)] = {
                 "cos": cosine_by_group(g, reference),

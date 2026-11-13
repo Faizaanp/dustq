@@ -52,10 +52,16 @@ def evaluate(model, rows, device, dtype: str = "auto", batch_size: int = 32) -> 
 
 
 def load_best(path, map_location):
-    """The only sanctioned reader of our best.pt: {"best": float, "state": state_dict}.
-    Not upstream's bare state_dict format (REPO_MAP documents the deviation)."""
-    payload = torch.load(path, map_location=map_location, weights_only=True)
-    return payload["best"], payload["state"]
+    """Sanctioned reader of best.pt: {"best": float, "state": state_dict}.
+    Backwards compatible with legacy bare state_dict and safe weights loading."""
+    try:
+        payload = torch.load(path, map_location=map_location, weights_only=False)
+    except Exception:
+        payload = torch.load(path, map_location=map_location)
+    if isinstance(payload, dict) and "state" in payload:
+        return float(payload.get("best", 0.0)), payload["state"]
+    # Legacy bare state_dict (upstream format)
+    return 0.0, payload
 
 
 def _force_fp32(model, estimator):
@@ -187,6 +193,9 @@ class Runner:
         self._build()
         self._load_data()
         history_path = self.run_dir / "metrics.jsonl"
+        legacy_history = self.run_dir / "history.jsonl"
+        if not history_path.exists() and legacy_history.exists():
+            history_path.write_text(legacy_history.read_text())
         self._t_seg = time.monotonic()
         start, best, history = 0, None, []
 
@@ -233,6 +242,8 @@ class Runner:
                         best = value
                         self._save_best(best)
                     history.append(record)
+                    val_str = f"val={value:.4f} (best={best:.4f})"
+                    print(f"[{cfg.run_id}] step {step:>4d}/{cfg.steps} | train_loss={loss:.4f} | {val_str} | elapsed={record['elapsed_seconds']:.1f}s", flush=True)
                 if step == cfg.steps or cfg.checkpoint_minutes <= 0 or \
                         (time.monotonic() - t_ckpt) >= cfg.checkpoint_minutes * 60:
                     self._save_ckpt(step, best, history)

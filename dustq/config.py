@@ -122,7 +122,15 @@ class RunConfig:
 def load_config(path: str | Path) -> RunConfig:
     raw = yaml.safe_load(Path(path).read_text())
     raw.pop("run_id", None)  # informational only; derived from the fields
-    return RunConfig(**raw).resolved()
+    # Keep only fields known to RunConfig dataclass for backwards compatibility with legacy YAMLs
+    import dataclasses
+    valid_fields = {f.name for f in dataclasses.fields(RunConfig)}
+    known_args = {k: v for k, v in raw.items() if k in valid_fields}
+    unknown = {k: v for k, v in raw.items() if k not in valid_fields}
+    cfg = RunConfig(**known_args)
+    if unknown:
+        cfg.meta.update(unknown)
+    return cfg.resolved()
 
 
 def load_configs_dir(directory: str | Path) -> list[tuple[str, RunConfig]]:

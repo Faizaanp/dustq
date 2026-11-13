@@ -45,6 +45,12 @@ print("gpu:", torch.cuda.get_device_name(0))
 
 import zipfile
 
+if not Path(REPO_ZIP).is_file():
+    if Path("dustq.zip").is_file():
+        REPO_ZIP = "dustq.zip"
+    else:
+        raise SystemExit(f"MISSING {REPO_ZIP}! Please upload dustq.zip to Colab (/content/dustq.zip) before running.")
+
 with zipfile.ZipFile(REPO_ZIP) as z:
     z.extractall("/content/dustq-repo")
 base = Path("/content/dustq-repo")
@@ -80,21 +86,33 @@ for link_name, target in [("data", DRIVE_DATA), ("results", DRIVE_RESULTS)]:
 Path("results/probes").mkdir(parents=True, exist_ok=True)
 
 def run_checked(cmd, **kwargs):
-    """Capture output; on failure print complete stderr and tails BEFORE exiting —
-    never let an inner crash's message vanish (the Tier-R truncated-note lesson)."""
-    result = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
-    if result.returncode != 0:
-        print("COMMAND FAILED:", " ".join(str(c) for c in cmd), flush=True)
-        if result.stdout:
-            out = result.stdout if len(result.stdout) <= 4000 else "...[tail]...\n" + result.stdout[-4000:]
-            print("--- stdout ---\n" + out, flush=True)
-        if result.stderr:
-            err = result.stderr if len(result.stderr) <= 8000 else "...[tail]...\n" + result.stderr[-8000:]
-            print("--- stderr ---\n" + err, flush=True)
-        raise SystemExit(f"exit {result.returncode}; see output above")
-    if result.stdout.strip():
-        print(result.stdout[-1500:], flush=True)
-    return result
+    """Stream stdout/stderr line-by-line so Colab never appears frozen or stalls
+    silently for hours, while retaining full tails for actionable crash diagnostics."""
+    print("RUNNING:", " ".join(str(c) for c in cmd), flush=True)
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        stdin=subprocess.DEVNULL,
+        **kwargs,
+    )
+    lines = []
+    if proc.stdout is not None:
+        for line in iter(proc.stdout.readline, ""):
+            print(line, end="", flush=True)
+            lines.append(line)
+            if len(lines) > 2000:
+                lines.pop(0)
+        proc.stdout.close()
+    returncode = proc.wait()
+    if returncode != 0:
+        tail = "".join(lines[-100:])
+        print(f"\nCOMMAND FAILED (exit {returncode}): {' '.join(str(c) for c in cmd)}", flush=True)
+        print("--- Output Tail ---\n" + tail, flush=True)
+        raise SystemExit(f"exit {returncode}; see output above")
+    return subprocess.CompletedProcess(cmd, returncode, stdout="".join(lines), stderr="")
 
 
 alpha = Path("configs/alpha_calibrated.json")
@@ -147,18 +165,18 @@ if runs_csv.is_file():
     ids = [r for r in csv.DictReader(runs_csv.open())]
     wanted = ("L8d512_1M_fp_dust_K256_s0_fp32", "L8d512_1M_w1p58a4_dust_K256_s0",
               "L8d512_1M_w1p58a4_dust_K256_s0_fp32")
-    hits = [r for r in ids if r["run_id"] in wanted]
+    hits = [r for r in ids if r.get("run_id") in wanted]
     for r in hits:
-        print(f"{r['run_id']}: val_best={r['val_loss_best']} test={r['test_loss_at_best_val']} "
-              f"steps={r['steps']} status={r['status']}")
+        print(f"{r.get('run_id')}: val_best={r.get('val_loss_best')} test={r.get('test_loss_at_best_val')} "
+              f"steps={r.get('steps')} status={r.get('status')}")
     if len(hits) < len(wanted):
         print(f"(only {len(hits)} of {len(set(wanted))} G1 rows found in runs.csv)")
-    base = [r for r in ids if r["run_id"] in
+    base = [r for r in ids if r.get("run_id") in
             ("L8d512_1M_fp_dust_K256_s0", "L8d512_1M_fp_dust_K256_s1",
-             "L8d512_1M_fp_dust_K256_s2") and r["status"] == "completed"]
+             "L8d512_1M_fp_dust_K256_s2") and r.get("status") == "completed"]
     if base:
         print("bf16 K256 base (Tier R, for comparison):",
-              [r["test_loss_at_best_val"] for r in base])
+              [r.get("test_loss_at_best_val") for r in base])
 else:
     print("runs.csv not found on Drive")
 

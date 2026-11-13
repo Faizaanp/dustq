@@ -110,6 +110,19 @@ class ProbeContext:
         from .train import load_best
         from dustq import qmodel as _qm  # noqa
         ckpt = Path(self.cfg.output_dir) / self.cfg.run_id / "best.pt"
+        if not ckpt.is_file():
+            # Checkpoint discovery fallback: probe-time flags (e.g. dust_forward='fake') or task suffixes
+            # may alter cfg.run_id relative to the canonical directory created during pretraining.
+            k = self.cfg.population if self.cfg.method == "dust" else 0
+            prec = self.cfg.precision.replace(".", "p").replace("/", "-")
+            candidates = [
+                Path(self.cfg.output_dir) / f"{self.cfg.size}_{self.cfg.tokens}_{prec}_{self.cfg.method}_K{k}_s{self.cfg.seed}" / "best.pt",
+                Path(self.cfg.output_dir) / f"{self.cfg.size}_{self.cfg.tokens}_{prec}_{self.cfg.method}_K{k}_s{self.cfg.seed}_{self.cfg.task}" / "best.pt",
+            ]
+            for cand in candidates:
+                if cand.is_file():
+                    ckpt = cand
+                    break
         best, state = load_best(ckpt, self.device)
         # BP path: the same quantized model the checkpoint was trained under.
         self.model = build_model(self.cfg.model_kwargs(), self.cfg.precision,

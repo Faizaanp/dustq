@@ -38,6 +38,8 @@ opencode.json
 # docs/PUBLICATION_STAGES.md -- already listed above
 
 docs/OPEN_QUESTIONS.md
+AGENTS.md
+docs/HANDOFF.md
 docs/FINDINGS.md
 docs/MONITORING.md
 docs/CUT_CELLS.md

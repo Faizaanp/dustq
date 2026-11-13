@@ -58,9 +58,9 @@ root = next(p for p in [base] + [q for q in base.iterdir() if q.is_dir()] if (p 
 os.chdir(root)
 print("repo at:", root)
 
-from google.colab import drive
-
-drive.mount("/content/drive")
+if not (Path("/content/drive/MyDrive").is_dir() or Path("/content/drive/My Drive").is_dir()):
+    from google.colab import drive
+    drive.mount("/content/drive")
 
 # Support both /content/drive/MyDrive and /content/drive/My Drive
 drive_candidates = [Path("/content/drive/MyDrive"), Path("/content/drive/My Drive")]

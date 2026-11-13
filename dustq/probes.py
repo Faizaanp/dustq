@@ -73,6 +73,8 @@ def collect_grads(model) -> dict[str, torch.Tensor]:
 
 
 def cosine(a: torch.Tensor, b: torch.Tensor) -> float:
+    if a.device != b.device:
+        b = b.to(a.device)
     denom = a.norm().item() * b.norm().item()
     if denom == 0:
         return 0.0
@@ -178,7 +180,8 @@ class ProbeContext:
             self._hook_handles = qmodel.register_act_hooks(
                 self.model, bits, scheme,
                 allow_lowbit_absmax=(self.cfg.task == "smoke"),
-                ste_mode=ste_mode, n_layer=self.model.config.n_layer)
+                ste_mode=ste_mode, n_layer=self.model.config.n_layer,
+                sigmas=self.cfg.sigmas)
         else:
             self._hook_handles = []
         self._hook_mode = ste_mode
@@ -258,7 +261,7 @@ def probe_reference(ctx, k_total: int = 16384) -> tuple[dict, dict, dict]:
     r_g = cosine_by_group(g1, g2)
     ref = {name: (g1[name] + g2[name]) / 2.0 for name in g1}
     med = sorted(r_g.values())
-    return ref, r_g, {"half": half, "r_g_median": med[len(med) // 2], "n_groups": len(r_g)}
+    return ref, r_g, {"half": half, "r_g_median": med[len(med) // 2] if med else None, "n_groups": len(r_g)}
 
 
 def probe_averaging_test(ctx, ns=(256, 1024, 4096), trials: int = 5, seed: int = 0) -> dict:
@@ -329,7 +332,7 @@ def _spearman_brown_sqrt(r_g: float) -> float | None:
     1/sqrt(r_ref). Returns None when r_g <= 0: the halves are uncorrelated or
     anti-correlated, disattenuation is mathematically undefined, and dividing by an epsilon
     would fabricate a number."""
-    if r_g is None or r_g <= 0:
+    if r_g is None or math.isnan(r_g) or r_g <= 0:
         return None
     r_ref = 2.0 * r_g / (1.0 + r_g)
     return math.sqrt(r_ref)
@@ -363,7 +366,6 @@ def probe_cosine_ladders(ctx, populations=(256, 1024, 4096), reference=None,
                           "r_g": r_g.get(gname),
                           "divisor": None if divisor is None else round(divisor, 6)}
         out[k] = row
-    return out
     return out
 
 
@@ -407,22 +409,24 @@ def probe_directional_descent(ctx, candidates: dict, grid: int = 12) -> dict:
     base_train = ctx.quantized_losses(ctx.x, ctx.y).mean().item()
     base_val = ctx.quantized_losses(ctx.vx, ctx.vy).mean().item()
     for name, grads in candidates.items():
+        if not grads:
+            continue
         flat = torch.cat([g for g in grads.values()])
         norm = flat.norm().item()
+        # Persistent backup snapshot allocated once per direction candidate
+        backup = [p.detach().clone() for p in ctx.model.parameters()]
 
         def ev(eps, direction=grads, batch=ctx.x, target=ctx.y, which="train", total=norm):
             with torch.no_grad():
-                backup = [p.detach().clone() for p in ctx.model.parameters()]
-                for (pname, param) in list(ctx.model.named_parameters()):
-                    if pname in direction and eps:
-                        # GLOBAL norm: step every tensor by eps toward -d/||d||, where ||d||
-                        # is the norm of the whole concatenated direction. Before 2026-11-08
-                        # each tensor was divided by its OWN norm, perturbing 4-element
-                        # lambda vectors by the same L2 distance as 4096x256 matrices and
-                        # rotating the direction being tested.
-                        param.add_(direction[pname].reshape(param.shape).to(param.device)
-                                   * (-eps / max(total, 1e-12)))
+                if eps:
+                    # GLOBAL norm: step every tensor by eps toward -d/||d||, where ||d||
+                    # is the norm of the whole concatenated direction.
+                    step_scale = -eps / max(total, 1e-12)
+                    for (pname, param) in ctx.model.named_parameters():
+                        if pname in direction:
+                            param.add_(direction[pname].reshape(param.shape).to(param.device) * step_scale)
                 value = ctx.quantized_losses(batch, target).mean().item()
+                # Restore from persistent snapshot
                 for p, b in zip(ctx.model.parameters(), backup):
                     p.copy_(b)
             return value - (base_train if which == "train" else base_val)

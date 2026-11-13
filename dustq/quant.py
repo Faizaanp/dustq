@@ -24,8 +24,7 @@ def ste_quantize(x: torch.Tensor, scale, lo: int, hi: int) -> torch.Tensor:
     applied to round itself (not just to clamp), or the whole path's gradient dies.
     """
     y = x / scale
-    y = y + (torch.round(y) - y).detach()          # forward: round(y); backward: identity
-    y = y + (torch.clamp(y, lo, hi) - y).detach()  # forward: clamp(y); backward: identity
+    y = y + (torch.clamp(torch.round(y), lo, hi) - y).detach()  # forward: clamp(round(y)); backward: identity
     return y * scale
 
 
@@ -78,7 +77,9 @@ class QLinear(nn.Linear):
         # weight is mutated in place (optimizer.step() bumps tensor._version). The old
         # per-forward recompute cost the measured 2.5-3.2x on every quantized run.
         self._codes = None
+        self._codes_t = None
         self._gamma = None
+        self._w_delta = None
         self._codes_version = -1
         # Activation stashes set by the act-quant pre-hook (DUST exact path + probe 5):
         # codes/scale for the exact matmul, `raw` for the pre-quantization input that any
@@ -93,7 +94,7 @@ class QLinear(nn.Linear):
 
     def _codes_and_gamma(self):
         w = self.weight
-        if self._codes is None or self._codes_version != w._version:
+        if self._codes is None or self._codes_version != w._version or self._codes.device != w.device:
             with torch.no_grad():
                 if self.quant_mode == "ternary":
                     gamma = w.abs().mean()
@@ -101,6 +102,8 @@ class QLinear(nn.Linear):
                 else:
                     gamma = w.abs().max().clamp(min=1e-5) / 127.0
                     codes = torch.clamp(torch.round(w / gamma), -128, 127)
+                self._w_delta = (gamma * codes - w).detach()
+                self._codes_t = codes.t()
             self._codes, self._gamma = codes, gamma
             self._codes_version = w._version
         return self._codes, self._gamma
@@ -108,9 +111,9 @@ class QLinear(nn.Linear):
     def effective_weight(self) -> torch.Tensor:
         """Forward value: gamma * codes exactly; backward: identity STE through the
         latent weight (codes/gamma are cached constants detached from the graph)."""
-        codes, gamma = self._codes_and_gamma()
-        w = self.weight
-        return w + (gamma * codes - w).detach()
+        if self._w_delta is None or self._codes_version != self.weight._version or (self._codes is not None and self._codes.device != self.weight.device):
+            self._codes_and_gamma()
+        return self.weight + self._w_delta
 
     def _exact_forward(self, x):
         """Integer-code path (T5/4.2): used when no backward is needed (DUST's forward-only
@@ -129,16 +132,23 @@ class QLinear(nn.Linear):
         codes, gamma = self._codes_and_gamma()
         if self._exact_mode == "fake":
             return F.linear(x, self.effective_weight(), self.bias)
-        if self._exact_mode != "tf32" or not x.is_cuda:
-            acc = self._act_codes.to(torch.float32) @ codes.to(torch.float32).transpose(0, 1)
-        else:
-            acc = _tf32_int_matmuls(self._act_codes.to(torch.float32),
-                                    codes.to(torch.float32).transpose(0, 1))
-        y = acc * self._act_scale.to(torch.float32) * gamma.to(torch.float32)
-        return y + self.bias if self.bias is not None else y
+        codes_t = self._codes_t if self._codes_t is not None else codes.t()
+        act_codes = self._act_codes.to(torch.float32)
+        # R8: PyTorch autocast on GPU silently downcasts fp32 @ to bfloat16, destroying
+        # integer-code bit-exactness on CUDA. Disable autocast for the exact integer matmul.
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            if self._exact_mode != "tf32" or not x.is_cuda:
+                acc = act_codes @ codes_t
+            else:
+                acc = _tf32_int_matmuls(act_codes, codes_t)
+            y = acc * self._act_scale.to(torch.float32) * gamma.to(torch.float32)
+            if self.bias is not None:
+                y = y + self.bias
+        if torch.is_autocast_enabled(x.device.type):
+            y = y.to(torch.get_autocast_dtype(x.device.type))
+        return y
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        codes, _ = self._codes_and_gamma()  # keep the cache warm even on autograd paths
         if self._exact_path and not torch.is_grad_enabled() and self._act_codes is not None:
             y = self._exact_forward(x)
             self._act_codes = None
@@ -180,7 +190,7 @@ class _SSTEActQuant(torch.autograd.Function):
         x, scale = ctx.saved_tensors
         lo, hi, sigma = ctx.lo, ctx.hi, ctx.sigma
         u = x / scale
-        j0 = torch.floor(u + 0.5)  # nearest code index
+        j0 = torch.clamp(torch.floor(u + 0.5), lo, hi)  # nearest code index centered in grid
         # Two corrections, both found by the 2026-11-06 probe session (P2's BP-SSTE
         # collapsed to Attn out -0.045 while BP-STE held 0.87):
         #
@@ -200,16 +210,26 @@ class _SSTEActQuant(torch.autograd.Function):
         #     That position-dependent loss is what broke the cosine at P2; the width is now
         #     tail-bounded so the sum is the derivative of the smoothed quantizer at any
         #     bit-width.
-        sigma_u = float((sigma / scale).max()) if scale.numel() else sigma / scale
-        half = max(3, int(math.ceil(4.0 * sigma_u)))
+        sigma_u = float((sigma / scale).max()) if scale.numel() else float(sigma / scale)
+        half = min(hi - lo, max(3, int(math.ceil(4.0 * sigma_u))))
+        # Prune dead iterations: k = j0 + d must fall strictly in [lo + 1, hi].
+        # Any d outside [lo + 1 - max(j0), hi - min(j0)] is guaranteed false everywhere.
+        d_min = max(-half, int(math.floor((lo + 1 - j0.max().item()))))
+        d_max = min(half, int(math.ceil((hi - j0.min().item()))))
         gx = torch.zeros_like(x)
-        for d in range(-half, half + 1):
-            k = j0 + d                       # boundary sits between codes k-1 and k
-            b = k - 0.5
-            valid = (k >= lo + 1) & (k <= hi) & ((u - b).abs() <= 4 * (sigma / scale))
-            bump = (torch.exp(-0.5 * ((x - scale * b) / sigma) ** 2)
-                    * scale / (sigma * math.sqrt(2 * math.pi)))
-            gx = gx + torch.where(valid, bump, torch.zeros_like(bump))
+        if d_min <= d_max:
+            inv_norm = scale / (sigma * math.sqrt(2 * math.pi))
+            inv_2sigma2 = -0.5 / (sigma ** 2)
+            four_sigma_over_scale = 4.0 * (sigma / scale)
+            for d in range(d_min, d_max + 1):
+                k = j0 + d                       # boundary sits between codes k-1 and k
+                b = k - 0.5
+                valid = (k >= lo + 1) & (k <= hi) & ((u - b).abs() <= four_sigma_over_scale)
+                if not valid.any():
+                    continue
+                diff = x - scale * b
+                bump = torch.exp(diff.square() * inv_2sigma2) * inv_norm
+                gx = gx + torch.where(valid, bump, torch.zeros_like(bump))
         return grad_out * gx, None, None, None, None
 
 

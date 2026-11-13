@@ -34,8 +34,9 @@ SIZES = {
 
 CSV_COLUMNS = [
     "run_id", "task", "model", "params", "tokens", "precision", "method", "K", "seed",
-    "lr", "momentum", "noise_scales", "val_loss_best", "test_loss_at_best_val", "steps",
-    "wall_s", "gpu", "dtype", "cu_burn_rate", "commit", "status", "notes",
+    "lr", "momentum", "noise_scales", "ste_mode", "dust_forward", "val_loss_best",
+    "test_loss_at_best_val", "steps", "wall_s", "gpu", "dtype", "cu_burn_rate", "commit",
+    "status", "notes",
 ]
 
 
@@ -88,6 +89,18 @@ class RunConfig:
     def run_id(self) -> str:
         k = self.population if self.method == "dust" else 0
         base = f"{self.size}_{self.tokens}_{sanitize(self.precision)}_{self.method}_K{k}_s{self.seed}"
+        # R9 disambiguation: keep existing Tier R / PCKPT runs untouched (defaults add no suffix).
+        # BP-SSTE vs BP-STE:
+        if self.method == "backprop" and self.ste_mode != "identity":
+            base += f"_{'sste' if self.ste_mode == 'smoothed' else self.ste_mode}"
+        # Dust forward mode (tf32 is Tier R default; fake is OQ-40):
+        if self.method == "dust" and self.dust_forward != "tf32":
+            base += f"_{self.dust_forward}"
+        # Tier B vs PCKPT:
+        if self.task == "B":
+            base += "_tierB"
+        elif self.task not in ("smoke", "PCKPT", "R", ""):
+            base += f"_{self.task}"
         # dtype suffix only on non-auto runs (G1 fp32 reruns must not collide with the
         # existing bf16 run in the same results dir — the queue skips by run_id)
         if self.dtype == "fp32":

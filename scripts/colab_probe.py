@@ -25,8 +25,6 @@ import time
 from pathlib import Path
 
 REPO_ZIP = "/content/dustq.zip"
-DRIVE_DATA = "/content/drive/MyDrive/dustq/data"
-DRIVE_RESULTS = "/content/drive/MyDrive/dustq/results"
 PY = sys.executable
 T0 = time.monotonic()
 
@@ -57,23 +55,43 @@ print("repo at:", root)
 from google.colab import drive
 
 drive.mount("/content/drive")
-if not Path("data").exists():
-    os.symlink(DRIVE_DATA, "data")
-# results/ is gitignored, so the fresh zip has none: without this link ProbeContext opens
-# results/<run_id>/best.pt and every probe run dies with FileNotFoundError before its first
-# gradient (this killed the 2026-11-02 session; the error was swallowed by subprocess.run).
-if not Path("results").exists():
-    os.symlink(DRIVE_RESULTS, "results")
+
+# Support both /content/drive/MyDrive and /content/drive/My Drive
+drive_candidates = [Path("/content/drive/MyDrive"), Path("/content/drive/My Drive")]
+drive_root = next((p for p in drive_candidates if p.is_dir()), None)
+if drive_root is None:
+    raise SystemExit("Neither /content/drive/MyDrive nor /content/drive/My Drive found!")
+
+DRIVE_DATA = drive_root / "dustq" / "data"
+DRIVE_RESULTS = drive_root / "dustq" / "results"
+DRIVE_RESULTS.mkdir(parents=True, exist_ok=True)
+(DRIVE_RESULTS / "probes").mkdir(parents=True, exist_ok=True)
+
+# Robust symlinking: os.path.lexists / unlink prevents FileExistsError on broken symlinks
+for link_name, target in [("data", DRIVE_DATA), ("results", DRIVE_RESULTS)]:
+    p = Path(link_name)
+    if os.path.lexists(link_name):
+        if p.is_symlink() and p.resolve() == target.resolve() and p.exists():
+            continue
+        p.unlink(missing_ok=True)
+    if not p.exists():
+        os.symlink(target, link_name)
+
+Path("results/probes").mkdir(parents=True, exist_ok=True)
 
 def run_checked(cmd, **kwargs):
-    """Capture output; on failure print the tails BEFORE exiting — never let an inner
-    crash's message vanish (the Tier-R truncated-note lesson, applied here too late)."""
+    """Capture output; on failure print complete stderr and tails BEFORE exiting —
+    never let an inner crash's message vanish (the Tier-R truncated-note lesson)."""
     result = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
     if result.returncode != 0:
-        print("COMMAND FAILED:", " ".join(cmd), flush=True)
-        print("--- stdout tail ---\n" + result.stdout[-2500:], flush=True)
-        print("--- stderr tail ---\n" + result.stderr[-4000:], flush=True)
-        raise SystemExit(f"exit {result.returncode}; see tails above")
+        print("COMMAND FAILED:", " ".join(str(c) for c in cmd), flush=True)
+        if result.stdout:
+            out = result.stdout if len(result.stdout) <= 4000 else "...[tail]...\n" + result.stdout[-4000:]
+            print("--- stdout ---\n" + out, flush=True)
+        if result.stderr:
+            err = result.stderr if len(result.stderr) <= 8000 else "...[tail]...\n" + result.stderr[-8000:]
+            print("--- stderr ---\n" + err, flush=True)
+        raise SystemExit(f"exit {result.returncode}; see output above")
     if result.stdout.strip():
         print(result.stdout[-1500:], flush=True)
     return result
@@ -82,9 +100,9 @@ def run_checked(cmd, **kwargs):
 alpha = Path("configs/alpha_calibrated.json")
 if not alpha.exists():
     print("regenerating the alpha table from the PCKPT P0 run", flush=True)
-    subprocess.run([PY, "scripts/calibrate_alpha.py", "--checkpoint",
-                    f"{DRIVE_RESULTS}/L4d256_1M_fp_backprop_K0_s0/best.pt",
-                    "--batches", "8"], check=True)
+    run_checked([PY, "scripts/calibrate_alpha.py", "--checkpoint",
+                 f"{DRIVE_RESULTS}/L4d256_1M_fp_backprop_K0_s0/best.pt",
+                 "--batches", "8"])
 
 # ---- 0a. fail fast on anything that would abort the session at its first probe ----
 print("\n=== 0a. preflight (data, checkpoints, alpha table) ===", flush=True)
@@ -94,12 +112,30 @@ for need, label in ((Path("data/train_1M.pt"), "data/train_1M.pt"),
     if not need.is_file():
         print(f"MISSING {label} — the probe session cannot start", flush=True)
         raise SystemExit(f"missing {label}")
+
+missing_p = []
 for run_id in S_PCKPTS + [M_P3]:
     ckpt = Path("results") / run_id / "best.pt"
-    print(f"{'ok ' if ckpt.is_file() else 'MISSING'} {ckpt}", flush=True)
-missing_p = [r for r in S_PCKPTS + [M_P3] if not (Path("results") / r / "best.pt").is_file()]
+    exists = ckpt.is_file()
+    status = "ok     " if exists else "MISSING"
+    diag = ""
+    if not exists:
+        missing_p.append(run_id)
+        run_dir = Path("results") / run_id
+        if (run_dir / "ckpt.pt").is_file():
+            diag = " (partial run: ckpt.pt exists, resume via scripts/run_queue.py)"
+        elif (run_dir / "FAILED_ATTEMPTS").is_file():
+            note = (run_dir / "FAILED_ATTEMPTS").read_text().splitlines()
+            diag = f" (failed run: {note[-1] if note else 'unknown'})"
+        elif not run_dir.exists():
+            diag = " (directory does not exist on Drive)"
+    print(f"{status} {ckpt}{diag}", flush=True)
+
 if missing_p:
-    raise SystemExit(f"checkpoints missing on Drive: {missing_p}")
+    print(f"\nActionable fix: run the queue to generate missing checkpoints on Colab L4:", flush=True)
+    for r in missing_p:
+        print(f"  {PY} scripts/run_queue.py --only {r}", flush=True)
+    raise SystemExit(f"checkpoints missing on Drive ({DRIVE_RESULTS}): {missing_p}")
 print("preflight passed", flush=True)
 
 # ---- 0b. G1 loss confirmation (the open half of gate G1) ----
@@ -129,7 +165,7 @@ else:
 # OQ-40 decision: the Dust probe gradients share the backprop probes' forward (Plan v3.1
 # 4.2). "fake" is the plan-consistent default and ~1.4x faster for the estimator; "tf32"
 # keeps the verified exact path for the ablation.
-DUST_FORWARD = "fake"
+DUST_FORWARD = os.environ.get("DUST_FORWARD", "fake")
 
 # ---- the run plan ----
 # P3 is the G2a gate precision, and its gate arms (probe 2's ladder, probe 4's descent) run
@@ -158,10 +194,33 @@ def json_path(run_id: str, which: str) -> Path:
     return PROBE_DIR / f"{run_id}_probes_{tag}.json"
 
 
+SECTION_MAP = {
+    0: "seed_noise",
+    2: "cosine_ladders",
+    3: "ste_bias",
+    4: "directional_descent",
+    5: "sigma_delta",
+}
+
+
+def is_step_done(run_id: str, which: str) -> bool:
+    """R14: Validate that every expected section is present in the JSON before skipping."""
+    import json
+    p = json_path(run_id, which)
+    if not p.is_file() or p.stat().st_size == 0:
+        return False
+    try:
+        data = json.loads(p.read_text())
+        req_keys = [SECTION_MAP[int(w)] for w in which.split(",") if int(w) in SECTION_MAP]
+        return all(k in data for k in req_keys)
+    except Exception:
+        return False
+
+
 print("\n=== resume plan (done steps are skipped) ===", flush=True)
 todo = []
 for run_id, which in STEPS:
-    done = json_path(run_id, which).is_file()
+    done = is_step_done(run_id, which)
     print(f"  {'DONE ' if done else 'TODO '} {run_id} probes {which}", flush=True)
     if not done:
         todo.append((run_id, which))

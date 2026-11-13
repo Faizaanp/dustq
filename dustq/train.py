@@ -103,7 +103,8 @@ class Runner:
                     scheme = "absmax"  # smoke runs do not require the calibrated table
                 qmodel.register_act_hooks(self.model, bits, scheme,
                                           allow_lowbit_absmax=(cfg.task == "smoke"),
-                                          ste_mode=cfg.ste_mode)
+                                          ste_mode=cfg.ste_mode,
+                                          sigmas=cfg.sigmas)
                 # DUST estimator path. dust_forward (OQ-40): "fake" = the same quantized
                 # forward BP-STE runs (Plan 3.1 4.2 "same forward pass"); tf32/fp32 are
                 # the verified exact paths (correctness artifacts + optional ablation).
@@ -115,13 +116,16 @@ class Runner:
             self.optimizer = dust_make_optimizer(self.model, settings)
         else:
             self.model.requires_grad_(True)
+            if cfg.dtype == "fp32" and self.device.type == "cuda":
+                self.model.to(dtype=torch.float32)
             if cfg.precision != "fp":
                 _, bits, scheme = qmodel.parse_precision(cfg.precision)
                 if cfg.task == "smoke":
                     scheme = "absmax"  # smoke runs do not require the calibrated table
                 qmodel.register_act_hooks(self.model, bits, scheme,
                                           allow_lowbit_absmax=(cfg.task == "smoke"),
-                                          ste_mode=cfg.ste_mode)
+                                          ste_mode=cfg.ste_mode,
+                                          sigmas=cfg.sigmas)
             self.optimizer = make_bp_optimizer(self.model, cfg.lr, cfg.momentum)
 
     def _load_data(self):
@@ -211,33 +215,52 @@ class Runner:
             history = [dict(step=0, val_loss=best)]
 
         t_start, t_ckpt = self._t_seg, time.monotonic()
-        for step in range(start + 1, cfg.steps + 1):
-            x, y = self._batch(step)
-            if cfg.method == "dust":
-                loss = self.estimator.step(x, y, self.optimizer)
-            else:
-                loss = train_step(self.model, self.optimizer, x, y)
-            # cumulative wall clock across resume segments (monotone; per-segment
-            # elapsed restarted at 0 before the 2026-10-17 fix and broke time plots)
-            record = dict(step=step, train_loss=loss,
-                          elapsed_seconds=self._wall_prior + (time.monotonic() - t_start))
-            if step == 1 or step % cfg.eval_interval == 0 or step == cfg.steps:
-                value = evaluate(self.model, self.val_rows, self.device, cfg.dtype)
-                record["val_loss"] = value
-                if best is None or value < best:
-                    best = value
-                    self._save_best(best)
-                history.append(record)
-            if step == cfg.steps or cfg.checkpoint_minutes <= 0 or \
-                    (time.monotonic() - t_ckpt) >= cfg.checkpoint_minutes * 60:
-                self._save_ckpt(step, best, history)
-                t_ckpt = time.monotonic()
-            with history_path.open("a") as stream:
-                stream.write(json.dumps(record) + "\n")
-
-        if self.estimator is not None:
-            self.estimator.close()
+        try:
+            for step in range(start + 1, cfg.steps + 1):
+                x, y = self._batch(step)
+                if cfg.method == "dust":
+                    loss = self.estimator.step(x, y, self.optimizer)
+                else:
+                    loss = train_step(self.model, self.optimizer, x, y, dtype=cfg.dtype)
+                # cumulative wall clock across resume segments (monotone; per-segment
+                # elapsed restarted at 0 before the 2026-10-17 fix and broke time plots)
+                record = dict(step=step, train_loss=loss,
+                              elapsed_seconds=self._wall_prior + (time.monotonic() - t_start))
+                if step == 1 or step % cfg.eval_interval == 0 or step == cfg.steps:
+                    value = evaluate(self.model, self.val_rows, self.device, cfg.dtype)
+                    record["val_loss"] = value
+                    if best is None or value < best:
+                        best = value
+                        self._save_best(best)
+                    history.append(record)
+                if step == cfg.steps or cfg.checkpoint_minutes <= 0 or \
+                        (time.monotonic() - t_ckpt) >= cfg.checkpoint_minutes * 60:
+                    self._save_ckpt(step, best, history)
+                    t_ckpt = time.monotonic()
+                with history_path.open("a") as stream:
+                    stream.write(json.dumps(record) + "\n")
+        finally:
+            if self.estimator is not None:
+                try:
+                    self.estimator.close()
+                except Exception:
+                    pass
         return self._finalize(best, history)
+
+    def close(self):
+        """Release all model and estimator hooks and memory allocations (R17)."""
+        if self.estimator is not None:
+            try:
+                self.estimator.close()
+            except Exception:
+                pass
+        self.model = None
+        self.optimizer = None
+        self.estimator = None
+        self.training = None
+        self.targets = None
+        self.val_rows = None
+        self.test_rows = None
 
     def _save_best(self, best: float):
         """C3: single self-describing file, atomic via tmp+replace — upstream's bare

@@ -28,7 +28,7 @@ def make_bp_optimizer(model, lr: float, momentum: float):
     return torch.optim.SGD(groups, lr=lr, momentum=momentum)
 
 
-def _bp_step(model, optimizer, x, y, microbatches: int) -> float:
+def _bp_step(model, optimizer, x, y, microbatches: int, dtype: str = "auto") -> float:
     """One backprop step over the batch, optionally split into equal chunks with
     gradient accumulation (token-count-weighted; equivalent to the full batch)."""
     optimizer.zero_grad(set_to_none=True)
@@ -38,9 +38,10 @@ def _bp_step(model, optimizer, x, y, microbatches: int) -> float:
         raise ValueError(f"batch {bs} not divisible by {n} microbatches")
     tokens_total = float((y != -1).sum())
     total_loss, tokens_seen = 0.0, 0.0
+    use_bf16 = x.is_cuda and dtype != "fp32"
     for i in range(n):
         xb, yb = x[i * bs // n:(i + 1) * bs // n], y[i * bs // n:(i + 1) * bs // n]
-        with torch.autocast(x.device.type, dtype=torch.bfloat16, enabled=x.is_cuda):
+        with torch.autocast(x.device.type, dtype=torch.bfloat16, enabled=use_bf16):
             loss = model(xb, yb)
         if not torch.isfinite(loss):
             raise FloatingPointError("Non-finite backpropagation loss")
@@ -55,19 +56,19 @@ def _bp_step(model, optimizer, x, y, microbatches: int) -> float:
     return total_loss / tokens_seen
 
 
-def train_step(model, optimizer, x, y) -> float:
+def train_step(model, optimizer, x, y, dtype: str = "auto") -> float:
     """One backprop step; returns the batch loss (baselines/backprop.py train_step),
     with automatic micro-batching on CUDA OOM. The chunk count that worked is cached on
     the model (`model._bp_microbatches`), so later steps start at the cached size instead
     of re-paying a wasted full-batch OOM every step (found in review: each retry burned a
     ~20 GB partial graph; that matters at 610-step budgets)."""
     if not x.is_cuda:
-        return _bp_step(model, optimizer, x, y, 1)
+        return _bp_step(model, optimizer, x, y, 1, dtype=dtype)
     n = getattr(model, "_bp_microbatches", 1)
     while True:
         oom = False
         try:
-            loss = _bp_step(model, optimizer, x, y, n)
+            loss = _bp_step(model, optimizer, x, y, n, dtype=dtype)
             if n > 1:
                 model._bp_microbatches = n
             return loss

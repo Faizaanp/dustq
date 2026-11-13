@@ -33,6 +33,7 @@ def _row_from(cfg: RunConfig, result: dict, status: str, notes: str = "") -> dic
         K=cfg.population if cfg.method == "dust" else 0,  # v1 convention: backprop rows are K0
         seed=cfg.seed, lr=cfg.lr, momentum=cfg.momentum,
         noise_scales=json.dumps(cfg.sigmas) if cfg.sigmas else "default",
+        ste_mode=cfg.ste_mode, dust_forward=cfg.dust_forward,
         val_loss_best=result.get("best_val", ""), test_loss_at_best_val=result.get("test_at_best_val", ""),
         steps=cfg.steps, wall_s=result.get("wall_s", ""), gpu=result.get("gpu", ""),
         dtype=result.get("dtype", ""), cu_burn_rate=cfg.cu_burn_rate,
@@ -75,7 +76,7 @@ def run_queue(configs_dir, results_dir="results", only: str | None = None,
             statuses.append(f"skip {cfg.run_id} (failed {MAX_ATTEMPTS}x)")
             continue
         cfg.output_dir = str(results_dir)  # runs land under the queue's results dir
-        failed = False
+        runner = None
         try:
             runner = Runner(cfg, device=None)
             result_path = runner.train()
@@ -98,10 +99,13 @@ def run_queue(configs_dir, results_dir="results", only: str | None = None,
             _append_csv_row(csv_path, _row_from(cfg, {}, "failed", notes=note[:500]))
             traceback.print_exc()
             statuses.append(f"FAILED {cfg.run_id}: {note}")
-            failed = True
-        if failed:
-            # Outside the except block (exception released): a failed run's model/optimizer
-            # and any zombie autograd graphs are reference cycles — force collection so the
-            # next config starts from clean memory.
+        finally:
+            # R17: Release runner and cycles on BOTH success and failure
+            if runner is not None:
+                runner.close()
+                del runner
             gc.collect()
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
     return statuses

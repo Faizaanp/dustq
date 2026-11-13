@@ -63,12 +63,13 @@ def site_sigma_key(name: str, n_layer: int) -> str | None:
     return None
 
 
-def site_sigma(name: str, n_layer: int) -> float:
+def site_sigma(name: str, n_layer: int, sigmas: dict | None = None) -> float:
     """Dust's per-site noise scale matched to our activation-quant sites [design]; see
     site_sigma_key for the mapping. Single source of truth: DEFAULT_SIGMAS."""
     key = site_sigma_key(name, n_layer)
-    # the fallback preserves the pre-refactor value for names outside the act sites
-    return DEFAULT_SIGMAS[key] if key is not None else DEFAULT_SIGMAS["writer"]
+    table = sigmas if sigmas is not None else DEFAULT_SIGMAS
+    fallback = table.get("writer", DEFAULT_SIGMAS["writer"])
+    return table.get(key, fallback) if key is not None else fallback
 
 
 def site_unsigned(name: str) -> bool:
@@ -142,7 +143,8 @@ def calibrated_alpha(bits: int, unsigned: bool, path: Path | None = None) -> flo
 
 def register_act_hooks(model: nn.Module, bits: int, scheme: str = "absmax",
                        allow_lowbit_absmax: bool = False, ste_mode: str = "identity",
-                       n_layer: int | None = None, alpha: float | None = None) -> list:
+                       n_layer: int | None = None, alpha: float | None = None,
+                       sigmas: dict | None = None) -> list:
     """Attach activation-quantization pre-hooks to the in-scope Linears.
 
     Must be called AFTER DUSTQ/DUST construction on the Dust path (hook order: noise then
@@ -170,7 +172,7 @@ def register_act_hooks(model: nn.Module, bits: int, scheme: str = "absmax",
         if site is None or not isinstance(module, nn.Linear):
             continue
         unsigned = site in _UNSIGNED_SITES
-        sigma = site_sigma(name, n_layer)
+        sigma = site_sigma(name, n_layer, sigmas=sigmas)
         # NB: don't reassign the `alpha` parameter here — signed and unsigned sites need
         # different calibrated values (a{bits}s vs a{bits}u), and this loop visits both in
         # one call. Mutating `alpha` made every site after the first reuse that first site's
@@ -200,7 +202,7 @@ def register_act_hooks(model: nn.Module, bits: int, scheme: str = "absmax",
                 if scheme == "absmax":
                     scale = x.detach().float().abs().amax(dim=-1, keepdim=True).clamp(min=1e-5) / hi
                 else:  # mse_alpha (calibrated alpha; guarded by the C5 check above)
-                    scale = alpha * x.detach().float().abs().mean(dim=-1, keepdim=True)
+                    scale = (alpha * x.detach().float().abs().mean(dim=-1, keepdim=True)).clamp(min=1e-5)
                 codes = torch.clamp(torch.round(x.detach().float() / scale), lo, hi)
                 module._act_codes = codes
                 module._act_scale = scale

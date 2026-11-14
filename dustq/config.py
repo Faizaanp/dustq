@@ -96,9 +96,13 @@ class RunConfig:
         # Dust forward mode (tf32 is Tier R default; fake is OQ-40):
         if self.method == "dust" and self.dust_forward != "tf32":
             base += f"_{self.dust_forward}"
-        # Tier B vs PCKPT:
+        # Tier B vs PCKPT vs Tuning:
         if self.task == "B":
             base += "_tierB"
+        elif self.task == "tune":
+            lr_str = f"{self.lr:g}" if self.lr is not None else "def"
+            mom_str = f"{self.momentum:g}" if self.momentum is not None else "def"
+            base += f"_tune_lr{lr_str}_m{mom_str}"
         elif self.task not in ("smoke", "PCKPT", "R", ""):
             base += f"_{self.task}"
         # dtype suffix only on non-auto runs (G1 fp32 reruns must not collide with the

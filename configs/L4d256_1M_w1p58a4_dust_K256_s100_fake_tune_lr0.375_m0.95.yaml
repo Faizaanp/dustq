@@ -1,0 +1,27 @@
+task: tune
+size: L4d256
+tokens: 1M
+precision: w1.58a4
+method: dust
+population: 256
+seed: 100
+lr: 0.375
+momentum: 0.95
+sigmas:
+  hidden: 0.420089
+  hub_deep: 0.110207
+  hub_shallow: 0.084098
+  local: 0.420038
+  writer: 0.971743
+ste_mode: identity
+dust_forward: fake
+dtype: auto
+data_dir: data
+output_dir: results
+steps: 61
+eval_interval: 2
+checkpoint_minutes: 10.0
+notes: ''
+cu_burn_rate: ''
+meta: {}
+run_id: L4d256_1M_w1p58a4_dust_K256_s100_fake_tune_lr0.375_m0.95

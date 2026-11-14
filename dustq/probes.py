@@ -276,7 +276,9 @@ def probe_reference(ctx, k_total: int = 16384) -> tuple[dict, dict, dict]:
     r_g = cosine_by_group(g1, g2)
     ref = {name: (g1[name] + g2[name]) / 2.0 for name in g1}
     med = sorted(r_g.values())
-    return ref, r_g, {"half": half, "r_g_median": med[len(med) // 2] if med else None, "n_groups": len(r_g)}
+    import statistics
+    r_g_median = float(statistics.median(med)) if med else None
+    return ref, r_g, {"half": half, "r_g_median": r_g_median, "n_groups": len(r_g)}
 
 
 def probe_averaging_test(ctx, ns=(256, 1024, 4096), trials: int = 5, seed: int = 0) -> dict:
@@ -436,7 +438,9 @@ def probe_directional_descent(ctx, candidates: dict, grid: int = 12) -> dict:
         # Persistent backup snapshot allocated once per direction candidate
         backup = [p.detach().clone() for p in ctx.model.parameters()]
 
-        def ev(eps, direction=grads, batch=ctx.x, target=ctx.y, which="train", total=norm):
+        def ev(eps, direction=grads, which="train", total=norm):
+            b = ctx.x if which == "train" else ctx.vx
+            t = ctx.y if which == "train" else ctx.vy
             with torch.no_grad():
                 if eps:
                     # GLOBAL norm: step every tensor by eps toward -d/||d||, where ||d||
@@ -445,10 +449,10 @@ def probe_directional_descent(ctx, candidates: dict, grid: int = 12) -> dict:
                     for (pname, param) in ctx.model.named_parameters():
                         if pname in direction:
                             param.add_(direction[pname].reshape(param.shape).to(param.device) * step_scale)
-                value = ctx.quantized_losses(batch, target).mean().item()
+                value = ctx.quantized_losses(b, t).mean().item()
                 # Restore from persistent snapshot
-                for p, b in zip(ctx.model.parameters(), backup):
-                    p.copy_(b)
+                for p, b_param in zip(ctx.model.parameters(), backup):
+                    p.copy_(b_param)
             return value - (base_train if which == "train" else base_val)
 
         results[name] = {

@@ -202,8 +202,10 @@ P3 = "L4d256_1M_w1p58a4_backprop_K0_s0"
 STEPS = [(P3, "3,2,0"), (P3, "4"), (P3, "5")]
 STEPS += [(r, "3,2") for r in S_PCKPTS if r != P3]      # P0, P2, P1
 STEPS.append((M_P3, "2,5"))                            # M
+STEPS.append((M_P3, "4"))                              # M Arm 2 directional descent
 
 PROBE_DIR = Path("results/probes")
+FORCE_PROBES = {p.strip() for p in os.environ.get("FORCE_PROBES", "").split(",") if p.strip()}
 
 
 def json_path(run_id: str, which: str) -> Path:
@@ -224,6 +226,9 @@ SECTION_MAP = {
 def is_step_done(run_id: str, which: str) -> bool:
     """R14: Validate that every expected section is present in the JSON before skipping."""
     import json
+    step_probes = {p.strip() for p in which.split(",")}
+    if any(p in FORCE_PROBES for p in step_probes):
+        return False
     p = json_path(run_id, which)
     if not p.is_file() or p.stat().st_size == 0:
         return False

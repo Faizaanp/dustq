@@ -205,7 +205,7 @@ STEPS.append((M_P3, "2,5"))                            # M
 STEPS.append((M_P3, "4"))                              # M Arm 2 directional descent
 
 PROBE_DIR = Path("results/probes")
-FORCE_PROBES = {p.strip() for p in os.environ.get("FORCE_PROBES", "").split(",") if p.strip()}
+FORCE_PROBES = {p.strip() for p in os.environ.get("FORCE_PROBES", "4").split(",") if p.strip()}
 
 
 def json_path(run_id: str, which: str) -> Path:

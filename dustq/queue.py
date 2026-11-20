@@ -84,14 +84,18 @@ def _attempts(run_dir: Path) -> int:
 
 
 def run_queue(configs_dir, results_dir="results", only: str | None = None,
-              cu_burn_rate: str = "", retry_failed: bool = False) -> list[str]:
+              cu_burn_rate: str = "", retry_failed: bool = False,
+              exact: bool = False) -> list[str]:
     configs_dir, results_dir = Path(configs_dir), Path(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
     csv_path = results_dir / "runs.csv"
     done, statuses = [], []
     for path, cfg in load_configs_dir(configs_dir):
-        if only and only not in cfg.run_id:
-            continue
+        if only:
+            if exact and cfg.run_id != only:
+                continue
+            if not exact and only not in cfg.run_id:
+                continue
         if cu_burn_rate:
             cfg.cu_burn_rate = cu_burn_rate
         run_dir = results_dir / cfg.run_id

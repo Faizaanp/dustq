@@ -129,6 +129,8 @@ class ProbeContext:
                                  self.device, seed=self.cfg.seed).requires_grad_(True)
         from dustq.backprop_ext import make_bp_optimizer
         self.model.load_state_dict(state)  # latents are fp32; state is on-device
+        if self.cfg.dtype == "fp32" and self.device.type == "cuda":
+            self.model.to(dtype=torch.float32)
         # OQ-40: the Dust probe path must share the backprop probes' quantized forward
         # (Plan v3.1 4.2, one function per comparison). cfg.dust_forward: "fake" (the
         # plan-consistent default and 1.4x faster for the estimator) or "tf32"/"fp32"
@@ -156,6 +158,7 @@ class ProbeContext:
             self.y = rows[:, 1:].contiguous().to(self.device)
         if self.heldout is not None:
             self.vx, self.vy = self.heldout
+            self.val_report_batches = [(self.vx, self.vy)]
         elif self.cfg.data_dir == "synthetic":
             from .runner import tiny_batch
 
@@ -163,10 +166,21 @@ class ProbeContext:
             length = self.model.config.sequence_len
             self.vx, self.vy = tiny_batch(self.device, seed=90 + self.cfg.seed,
                                           sequences=8, length=length, vocab=vocab)
+            self.val_report_batches = [
+                tiny_batch(self.device, seed=190 + self.cfg.seed + i,
+                           sequences=8, length=length, vocab=vocab)
+                for i in range(4)
+            ]
         else:
-            val = load_sequences(Path(self.cfg.data_dir) / "val.pt", 8)
-            self.vx = val[:, :-1].contiguous().to(self.device)
-            self.vy = val[:, 1:].contiguous().to(self.device)
+            # Disjoint selection split [0:8] vs held-out report splits [8:40] from val.pt (544 rows)
+            val = load_sequences(Path(self.cfg.data_dir) / "val.pt", 40)
+            self.vx = val[:8, :-1].contiguous().to(self.device)
+            self.vy = val[:8, 1:].contiguous().to(self.device)
+            self.val_report_batches = [
+                (val[i:i + 8, :-1].contiguous().to(self.device),
+                 val[i:i + 8, 1:].contiguous().to(self.device))
+                for i in range(8, len(val), 8)
+            ]
 
     # ---- gradient collection ----
 
@@ -199,6 +213,10 @@ class ProbeContext:
             self._hook_handles = []
         self._hook_mode = ste_mode
 
+    @property
+    def _use_bf16(self) -> bool:
+        return self.device.type == "cuda" and self.cfg.dtype != "fp32"
+
     def dust_grads(self, seed: int, population: int = 256, sigmas: dict | None = None,
                    apply_update: bool = False) -> dict:
         """A Dust gradient estimate at `population` (seed selects the noise stream)."""
@@ -215,6 +233,9 @@ class ProbeContext:
         # act hook sees). That made every Dust probe gradient a different function from
         # the one Tier B trains.
         est = DUSTQ(model, settings, seed=seed, sigmas=sigmas)
+        if self.cfg.dtype == "fp32" and self.device.type == "cuda":
+            model.to(dtype=torch.float32)
+            est.dtype = torch.float32
         self._ensure_hooks("identity", force=True)
         opt = torch.optim.SGD(model.parameters(), lr=0.0 if not apply_update else 1e-3)
         est.step(self.x, self.y, opt)
@@ -229,7 +250,7 @@ class ProbeContext:
         # fresh hooks per backward mode so BOTH modes evaluate on the SAME weights
         self._ensure_hooks(ste_mode)
         self.optimizer.zero_grad(set_to_none=True)
-        with torch.autocast(self.model_device_str(), dtype=torch.bfloat16, enabled=self.device.type == "cuda"):
+        with torch.autocast(self.model_device_str(), dtype=torch.bfloat16, enabled=self._use_bf16):
             loss = self.model(self.x, self.y)
         loss.backward()
         grads = collect_grads(self.model)
@@ -243,7 +264,7 @@ class ProbeContext:
     def quantized_losses(self, x, y) -> torch.Tensor:
         self._ensure_hooks(self._hook_mode or "identity")
         with torch.no_grad():
-            with torch.autocast(self.model_device_str(), dtype=torch.bfloat16, enabled=self.device.type == "cuda"):
+            with torch.autocast(self.model_device_str(), dtype=torch.bfloat16, enabled=self._use_bf16):
                 return self.model(x, y, loss_reduction="none")
 
 
@@ -296,29 +317,30 @@ def probe_averaging_test(ctx, ns=(256, 1024, 4096), trials: int = 5, seed: int =
     ref_norm = {g: r.norm().item() for g, r in ref.items()}
     out = {}
     for n in ns:
-        dots, devs = {}, {}
+        dots, dev_norms = {}, {}
         for t in range(trials):
-            g = ctx.dust_grads(seed=seed + t * 5000, population=n)
+            # Offset trial seeds so t=0 never collides with `seed` used for `ref`
+            g = ctx.dust_grads(seed=seed + (t + 1) * 5000, population=n)
             for name, r in ref.items():
                 if name not in g:
                     continue
                 dots.setdefault(name, []).append(torch.dot(g[name], r).item())
-                devs.setdefault(name, []).append(g[name] - r)
+                dev_norms.setdefault(name, []).append((g[name] - r).norm().item())
         out[n] = {name: {
             "bias_along_ref": sum(dots[name]) / trials / max(ref_norm[name], 1e-12) - ref_norm[name] / 2,
-            "rms_dev": torch.stack([d.norm() for d in devs[name]]).mean().item(),
+            "rms_dev": sum(dev_norms[name]) / trials,
         } for name in dots}
     return out
 
 
-def probe_per_tensor_cosine(ctx, reference, populations=(256, 1024)) -> dict:
+def probe_per_tensor_cosine(ctx, reference, populations=(256, 1024), base_seed: int = 10000) -> dict:
     """Watch lead (2026-10-31, OPEN_QUESTIONS 37; cf. the Noise fork's check_quant.py):
     the same cosines as probe 2 but per PARAMETER TENSOR rather than per group — the
     fork's harness is per-tensor, so this cross-checks our grouped numbers against
     the external convention. Returns {population: {param_name: cos}}."""
     out = {}
-    for k in populations:
-        g = ctx.dust_grads(seed=0, population=k)
+    for idx, k in enumerate(populations):
+        g = ctx.dust_grads(seed=base_seed + idx * 1000, population=k)
         out[k] = {name: cosine(g[name], reference[name])
                   for name in reference if name in g}
     return out
@@ -338,44 +360,48 @@ def probe_seed_noise(ctx, seeds=(0, 1), populations=(256, 1024)) -> dict:
     return out
 
 
-def _spearman_brown_sqrt(r_g: float) -> float | None:
+MIN_RELIABILITY = 0.2
+
+
+def _spearman_brown_sqrt(r_g: float, min_r_g: float = MIN_RELIABILITY) -> float | None:
     """Spearman-Brown stepped-up reliability for the MEAN of two parallel measurements, then
     square-rooted to give the reference's correlation with the true signal:
 
         r_ref = 2*r_g / (1 + r_g)      (reliability of the averaged reference)
         corr(ref, truth) = sqrt(r_ref) (what a measured cosine is attenuated by)
 
-    This is the disattenuation DIVISOR. The pre-2026-11-08 code divided by r_g itself, which
-    divides the reference's noise out twice and under-corrects the signal by
-    1/sqrt(r_ref). Returns None when r_g <= 0: the halves are uncorrelated or
-    anti-correlated, disattenuation is mathematically undefined, and dividing by an epsilon
-    would fabricate a number."""
-    if r_g is None or math.isnan(r_g) or r_g <= 0:
+    This is the disattenuation DIVISOR. Returns None when r_g < min_r_g (default 0.2):
+    uncorrelated or low-reliability groups amplify estimation noise violently (e.g. >10x
+    at r_g=0.003) and saturate the [-1, 1] clamp into spurious +/-1.0 alignments."""
+    if r_g is None or math.isnan(r_g) or r_g < min_r_g:
         return None
     r_ref = 2.0 * r_g / (1.0 + r_g)
     return math.sqrt(r_ref)
 
 
 def probe_cosine_ladders(ctx, populations=(256, 1024, 4096), reference=None,
-                         r_g: dict | None = None) -> dict:
+                         r_g: dict | None = None, base_seed: int = 10000) -> dict:
     """Probe 2: cos(Dust-K, ref) per layer type vs K. Reports BOTH the raw cosine and the
     disattenuated one per the reporting precedent arXiv:2609.19589 (WATCH 2026-11-01B):
     state what you divided out. Returns
     {population: {group: {"raw": c, "disattenuated": v, "r_g": ..., "divisor": ...}}}.
 
-    The divisor is sqrt(spearman_brown(r_g)) per group (see _spearman_brown_sqrt); it is
-    computed here only when the caller does not already have r_g, which costs another
-    reference pair. `disattenuated` is None for groups where r_g <= 0 - undefined, not a
-    number - and is clamped to [-1, 1] everywhere else (a cosine cannot leave that range;
-    the old min(1, ...) left negatives unbounded, and -1.45 appeared in the M data)."""
+    Each population rung uses an independent seed (base_seed + idx * 1000, default >= 10000),
+    disjoint from probe_reference's halves (seeds 0 and 5000) and from each other. Before
+    2026-11-20 every rung reused seed=0, making K=4096 bit-identical to half 1 of the
+    reference and mathematically forcing disattenuated == 1.0 for every positive group.
+
+    The divisor is sqrt(spearman_brown(r_g)) per group; `disattenuated` is None when
+    r_g < MIN_RELIABILITY (undefined/unreliable) and clamped to [-1, 1] otherwise."""
     if reference is None:
         reference, r_g, _meta = probe_reference(ctx)
     elif r_g is None:
         r_g = {}
     out = {}
-    for k in populations:
-        print(f"  [probe 2] cosine_ladders computing K={k}...", flush=True)
-        g = ctx.dust_grads(seed=0, population=k)
+    for idx, k in enumerate(populations):
+        rung_seed = base_seed + idx * 1000
+        print(f"  [probe 2] cosine_ladders computing K={k} (seed={rung_seed})...", flush=True)
+        g = ctx.dust_grads(seed=rung_seed, population=k)
         per_group = cosine_by_group(g, reference)
         row = {}
         for gname, c in per_group.items():
@@ -418,29 +444,34 @@ def directional_descent(evaluate, steepest=1e-1, steps=12):
     return best
 
 
-def probe_directional_descent(ctx, candidates: dict, grid: int = 12) -> dict:
-    """Probe 4: for each candidate direction, min over eps of L_q(theta - eps*d/||d||)
-    - L_q(theta), on the training batch and one held-out val batch. L_q is the real
-    quantized loss, so this is the method-neutral arbiter."""
-    import copy
+def probe_directional_descent(ctx, candidates: dict, grid: int = 12,
+                              val_batches: list | None = None) -> dict:
+    """Probe 4: for each candidate direction, measure L_q(theta - eps*d/||d||) - L_q(theta).
+
+    Separates step-size selection (on ctx.vx, ctx.vy) from held-out reporting (on disjoint
+    val_report_batches when available) so reported validation deltas are not biased
+    in-batch minima, and computes multi-batch standard deviation and standard error."""
+    import statistics
 
     from .quant import ste_act_quantize  # noqa: F401  (documentation import)
 
+    report_batches = (val_batches if val_batches is not None
+                      else getattr(ctx, "val_report_batches", None) or [(ctx.vx, ctx.vy)])
     results = {}
     base_train = ctx.quantized_losses(ctx.x, ctx.y).mean().item()
-    base_val = ctx.quantized_losses(ctx.vx, ctx.vy).mean().item()
+    base_val_sel = ctx.quantized_losses(ctx.vx, ctx.vy).mean().item()
+    base_report = [ctx.quantized_losses(bx, by).mean().item() for bx, by in report_batches]
+
     for name, grads in candidates.items():
         if not grads:
             continue
         print(f"  [probe 4] directional_descent evaluating candidate {name}...", flush=True)
         flat = torch.cat([g for g in grads.values()])
         norm = flat.norm().item()
-        # Persistent backup snapshot allocated once per direction candidate
         backup = [p.detach().clone() for p in ctx.model.parameters()]
 
-        def ev(eps, direction=grads, which="train", total=norm):
-            b = ctx.x if which == "train" else ctx.vx
-            t = ctx.y if which == "train" else ctx.vy
+        def _apply_and_restore(eps, batches, bases, direction=grads, total=norm):
+            deltas = []
             with torch.no_grad():
                 if eps:
                     # GLOBAL norm: step every tensor by eps toward -d/||d||, where ||d||
@@ -449,15 +480,41 @@ def probe_directional_descent(ctx, candidates: dict, grid: int = 12) -> dict:
                     for (pname, param) in ctx.model.named_parameters():
                         if pname in direction:
                             param.add_(direction[pname].reshape(param.shape).to(param.device) * step_scale)
-                value = ctx.quantized_losses(b, t).mean().item()
-                # Restore from persistent snapshot
+                for (bx, by), base in zip(batches, bases):
+                    val = ctx.quantized_losses(bx, by).mean().item()
+                    deltas.append(val - base)
                 for p, b_param in zip(ctx.model.parameters(), backup):
                     p.copy_(b_param)
-            return value - (base_train if which == "train" else base_val)
+            return deltas
+
+        def ev_train(eps):
+            return _apply_and_restore(eps, [(ctx.x, ctx.y)], [base_train])[0]
+
+        def ev_val_sel(eps):
+            return _apply_and_restore(eps, [(ctx.vx, ctx.vy)], [base_val_sel])[0]
+
+        best_train_delta, eps_train = directional_descent(ev_train, steps=grid)
+        best_val_sel_delta, eps_val_sel = directional_descent(ev_val_sel, steps=grid)
+
+        # Evaluate out-of-sample on the disjoint report split at the selection-split eps*
+        val_deltas = _apply_and_restore(eps_val_sel, report_batches, base_report)
+        val_rep_mean = float(statistics.mean(val_deltas))
+        val_rep_std = float(statistics.stdev(val_deltas)) if len(val_deltas) > 1 else 0.0
+        val_rep_se = float(val_rep_std / math.sqrt(len(val_deltas)))
+
+        # Also evaluate on the report split using the train-selected eps*
+        val_train_eps_deltas = _apply_and_restore(eps_train, report_batches, base_report)
+        val_at_train_mean = float(statistics.mean(val_train_eps_deltas))
 
         results[name] = {
-            "train": directional_descent(lambda e: ev(e, which="train"), steps=grid),
-            "val": directional_descent(lambda e: ev(e, which="val"), steps=grid),
+            "train": (best_train_delta, eps_train),
+            "val": (val_rep_mean, eps_val_sel),
+            "val_selected_in_batch": (best_val_sel_delta, eps_val_sel),
+            "val_at_train_eps": (val_at_train_mean, eps_train),
+            "val_report_std": val_rep_std,
+            "val_report_se": val_rep_se,
+            "val_report_n": len(val_deltas),
+            "val_per_batch": val_deltas,
             "norm": norm,
         }
     return results
@@ -607,6 +664,13 @@ def probe_sigma_delta(ctx, reference, sigma_fractions=(1 / 8, 1 / 4, 1 / 2, 1, 2
     return out
 
 
+def probe_report_path(cfg: RunConfig, probes: str | set[int], out: str | Path = "results/probes") -> Path:
+    """Canonical output path for a probe run after applying config/CLI overrides."""
+    which = {int(p) for p in probes.split(",")} if isinstance(probes, str) else set(probes)
+    tag = "-".join(str(p) for p in sorted(which))
+    return Path(out) / f"{cfg.run_id}_probes_{tag}.json"
+
+
 # ---------- CLI (one cell on Colab) ----------
 
 def main():
@@ -634,8 +698,7 @@ def main():
         subprocess, and a fixed name meant the later subsets silently overwrote the earlier
         ones' JSON (probe 5's write erased the ladder and the descent that G2a needs).
         """
-        tag = "-".join(str(p) for p in sorted(which))
-        path = Path(args.out) / f"{cfg.run_id}_probes_{tag}.json"
+        path = probe_report_path(cfg, which, args.out)
         path.write_text(json.dumps(report, indent=1))
         print("wrote", path, flush=True)
 
@@ -668,6 +731,8 @@ def main():
         # state what was divided out, per group (arXiv:2609.19589 reporting precedent)
         report["disattenuation"] = {
             "divisor": "sqrt(spearman_brown(r_g)) per group",
+            "min_r_g": MIN_RELIABILITY,
+            "rung_seeds": {str(k): 10000 + idx * 1000 for idx, k in enumerate((256, 1024, 4096))},
             "by_group": {g: round(v, 6) for g, v in
                          ((g, _spearman_brown_sqrt(r_g.get(g))) for g in r_g) if v is not None},
             "undefined_groups": [g for g in r_g if _spearman_brown_sqrt(r_g[g]) is None],
@@ -719,11 +784,29 @@ def main():
             "STE": ctx.bp_grads("identity"),
             "SSTE": ctx.bp_grads("smoothed"),
             "Dust256": ctx.dust_grads(seed=0, population=256),
+            "Dust256_s1": ctx.dust_grads(seed=1, population=256),
+            "Dust256_s2": ctx.dust_grads(seed=2, population=256),
             "Dust1k": ctx.dust_grads(seed=0, population=1024),
+            "Dust1k_s1": ctx.dust_grads(seed=1, population=1024),
+            "Dust1k_s2": ctx.dust_grads(seed=2, population=1024),
         }
         dd = probe_directional_descent(ctx, cand)
-        report["directional_descent"] = {k: {"train": v["train"], "val": v["val"]}
-                                         for k, v in dd.items()}
+        report["directional_descent"] = dd
+        import statistics
+        seed_summary = {}
+        for fam, keys in (("Dust256", ("Dust256", "Dust256_s1", "Dust256_s2")),
+                          ("Dust1k", ("Dust1k", "Dust1k_s1", "Dust1k_s2"))):
+            vals = [dd[k]["val"][0] for k in keys if k in dd]
+            if vals:
+                std = float(statistics.stdev(vals)) if len(vals) > 1 else 0.0
+                seed_summary[fam] = {
+                    "n_seeds": len(vals),
+                    "val_mean": float(statistics.mean(vals)),
+                    "val_std": std,
+                    "val_se": float(std / math.sqrt(len(vals))),
+                    "per_seed_val": vals,
+                }
+        report["directional_descent_seeds"] = seed_summary
         save()
         print(json.dumps(report["directional_descent"], indent=1))
 

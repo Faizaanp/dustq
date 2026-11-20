@@ -24,7 +24,8 @@ import torch
 from torch import nn
 
 from .dust_ext import DEFAULT_SIGMAS
-from .quant import QLinear, sste_act_quantize, ste_act_quantize, swap_linear
+from .quant import (QLinear, act_quant_bounds_and_scale, sste_act_quantize,
+                    ste_act_quantize, swap_linear)
 
 WEIGHT_QUANT_SITES = ("attn.c_q", "attn.c_k", "attn.c_v", "attn.c_proj", "mlp.c_fc", "mlp.c_proj")
 ACT_QUANT_SITES = WEIGHT_QUANT_SITES  # inputs of the weight-quantized Linears
@@ -193,16 +194,10 @@ def register_act_hooks(model: nn.Module, bits: int, scheme: str = "absmax",
                 # the spy saw x == codes*scale exactly, so every activation sat at its bin
                 # centre instead of a continuous offset in [-0.5, +0.5] of a code).
                 module._act_raw = x.detach()
-                # Stash codes + scale for QLinear's exact path (identical values to the
-                # dequantized input: same formulas, deterministic).
-                if unsigned:
-                    lo, hi = 0, 2 ** bits - 1
-                else:
-                    lo, hi = -(2 ** (bits - 1)), 2 ** (bits - 1) - 1
-                if scheme == "absmax":
-                    scale = x.detach().float().abs().amax(dim=-1, keepdim=True).clamp(min=1e-5) / hi
-                else:  # mse_alpha (calibrated alpha; guarded by the C5 check above)
-                    scale = (alpha * x.detach().float().abs().mean(dim=-1, keepdim=True)).clamp(min=1e-5)
+                # Stash codes + scale for QLinear's exact path via the shared helper so
+                # stashed values are bit-identical to ste/sste_act_quantize.
+                lo, hi, scale = act_quant_bounds_and_scale(
+                    x, bits, unsigned=unsigned, scheme=scheme, alpha=alpha)
                 codes = torch.clamp(torch.round(x.detach().float() / scale), lo, hi)
                 module._act_codes = codes
                 module._act_scale = scale

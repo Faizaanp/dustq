@@ -186,8 +186,15 @@ class PreflightChecker:
         try:
             data = json.loads(alpha_path.read_text())
             report["details"]["provenance"] = data.get("provenance", {})
-            report["details"]["alphas"] = data.get("alphas", {})
-            report["passed"] = bool(data.get("alphas"))
+            alphas = data.get("alpha") or data.get("alphas") or {}
+            report["details"]["alpha"] = alphas
+            required = ("a4s", "a4u", "a2s", "a2u")
+            missing = [k for k in required if k not in alphas or not isinstance(alphas[k], (int, float)) or not math.isfinite(alphas[k]) or alphas[k] <= 0]
+            if missing:
+                report["error"] = f"Alpha calibration table missing or invalid keys {missing} in {alpha_path}"
+                report["passed"] = False
+            else:
+                report["passed"] = True
         except Exception as exc:
             report["error"] = f"Failed to parse alpha calibration JSON: {exc}"
 
@@ -486,19 +493,26 @@ class TrainingWatchdog:
             if not lines:
                 return True, {"mtime": mtime}, None
 
-            last_record = json.loads(lines[-1])
-            step = last_record.get("step", 0)
-            train_loss = last_record.get("train_loss")
-            val_loss = last_record.get("val_loss")
+            last_record = None
+            for idx, raw_line in enumerate(lines):
+                try:
+                    rec = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    # Ignore a partial trailing line written right before a crash
+                    if idx == len(lines) - 1:
+                        continue
+                    raise
+                last_record = rec
+                for k in ("train_loss", "val_loss"):
+                    val = rec.get(k)
+                    if val is not None:
+                        if math.isnan(val) or math.isinf(val):
+                            return False, rec, f"Non-finite {k} detected at step {rec.get('step')}: {val}"
+                        if val > self.max_allowed_loss:
+                            return False, rec, f"Catastrophic loss divergence at step {rec.get('step')}: {k}={val} exceeds {self.max_allowed_loss}"
 
-            # Check finiteness
-            for k, val in [("train_loss", train_loss), ("val_loss", val_loss)]:
-                if val is not None:
-                    if math.isnan(val) or math.isinf(val):
-                        return False, last_record, f"Non-finite {k} detected: {val}"
-                    if val > self.max_allowed_loss:
-                        return False, last_record, f"Catastrophic loss divergence: {k}={val} exceeds {self.max_allowed_loss}"
-
+            if last_record is None:
+                return True, {"mtime": mtime}, None
             return True, {**last_record, "mtime": mtime}, None
 
         except Exception as exc:
@@ -508,25 +522,34 @@ class TrainingWatchdog:
         """Execute a full watchdog health check cycle [design]."""
         gpu_mb, gpu_util = self.query_gpu_stats()
 
-        # Check if completed successfully
-        if self.result_path.is_file() and not self.process_mgr.is_alive():
+        # Completed if valid result.json exists (even if process teardown is still finishing)
+        if self.result_path.is_file():
             try:
                 res = json.loads(self.result_path.read_text())
-                return HealthStatus(
-                    healthy=True,
-                    status_str="completed",
-                    step=res.get("steps", 0),
-                    total_steps=res.get("steps", 0),
-                    val_loss=res.get("best_val"),
-                    gpu_mem_used_mb=gpu_mb,
-                    gpu_util_pct=gpu_util,
-                )
+                if "best_val" in res:
+                    return HealthStatus(
+                        healthy=True,
+                        status_str="completed",
+                        step=res.get("steps", 0),
+                        total_steps=res.get("steps", 0),
+                        val_loss=res.get("best_val"),
+                        gpu_mem_used_mb=gpu_mb,
+                        gpu_util_pct=gpu_util,
+                    )
             except Exception:
                 pass
 
         # Check process liveness
         if not self.process_mgr.is_alive():
             exit_code = self.process_mgr.get_exit_code()
+            if exit_code == 0:
+                return HealthStatus(
+                    healthy=False,
+                    status_str="skipped",
+                    gpu_mem_used_mb=gpu_mb,
+                    gpu_util_pct=gpu_util,
+                    error_message="Queue exited with code 0 without producing result.json (run skipped or filtered out)",
+                )
             tail = self.process_mgr.get_log_tail(1500)
             status_str = "oom" if ("CUDA out of memory" in tail or "OutOfMemoryError" in tail) else "crashed"
             return HealthStatus(
@@ -639,6 +662,7 @@ class DiagnosticEngine:
         process_mgr: ProcessManager,
         health: HealthStatus,
         bridge_outbox: Optional[Path] = None,
+        prior_attempts: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Capture full diagnostics, terminate errant process, and dump failure artifacts [design]."""
         run_dir = Path(run_dir)
@@ -660,6 +684,9 @@ class DiagnosticEngine:
         elif health.status_str == "nan_inf":
             classification = "NUMERICAL_INSTABILITY_NAN_INF"
             remediation_suggestion = "Check learning rate, activation hooks scale, or SSTE backward denominator."
+        elif health.status_str == "skipped":
+            classification = "SKIPPED_NO_RESULT"
+            remediation_suggestion = "Queue exited cleanly without running this config (check MAX_ATTEMPTS or --only filter)."
         elif health.status_str == "stalled":
             classification = "PROCESS_HANG_HEARTBEAT_TIMEOUT"
             remediation_suggestion = "Process hung in deadlock or infinite loop. Restart from verified checkpoint."
@@ -682,7 +709,7 @@ class DiagnosticEngine:
         )
         traceback_file.write_text(traceback_content, encoding="utf-8")
 
-        # 5. Update FAILED_ATTEMPTS marker
+        # 5. Update FAILED_ATTEMPTS marker (without double-counting if queue.py already incremented it)
         failed_marker = run_dir / "FAILED_ATTEMPTS"
         attempts = 0
         if failed_marker.is_file():
@@ -690,8 +717,9 @@ class DiagnosticEngine:
                 attempts = int(failed_marker.read_text().splitlines()[0])
             except Exception:
                 attempts = 0
-        attempts += 1
-        failed_marker.write_text(f"{attempts}\n{classification}\n{health.error_message}\n")
+        if prior_attempts is None or attempts <= prior_attempts:
+            attempts += 1
+            failed_marker.write_text(f"{attempts}\n{classification}\n{health.error_message}\n")
 
         # 6. Capture system snapshot
         sys_snapshot = DiagnosticEngine.capture_system_snapshot()
@@ -911,12 +939,20 @@ class AutonomousOrchestrator:
         # -------------------------------------------------------------
         # Invoke runner via python subprocess to isolate PyTorch CUDA context
         py_exe = sys.executable
-        # Use queue script or direct Runner invocation command
+        failed_marker = run_dir / "FAILED_ATTEMPTS"
+        attempts_before = 0
+        if failed_marker.is_file():
+            try:
+                attempts_before = int(failed_marker.read_text().splitlines()[0])
+            except Exception:
+                attempts_before = 0
+
         cmd = [
             py_exe, "scripts/run_queue.py",
             "--configs-dir", str(self.configs_dir),
             "--results-dir", str(self.results_dir),
             "--only", run_id,
+            "--exact",
             "--cu-burn-rate", self.cu_burn_rate,
         ]
         if self.retry_failed:
@@ -957,11 +993,12 @@ class AutonomousOrchestrator:
                     process_mgr=self.process_mgr,
                     health=status,
                     bridge_outbox=self.bridge.outbox_dir if self.bridge else None,
+                    prior_attempts=attempts_before,
                 )
                 print(f"-> Stage 4 Diagnostics: {incident['classification']}", flush=True)
                 print(f"   Dumped report to: {incident['traceback_path']}", flush=True)
 
-                if incident["attempts"] >= MAX_CONSECUTIVE_RETRIES:
+                if status.status_str == "skipped" or incident["attempts"] >= MAX_CONSECUTIVE_RETRIES:
                     print(f"!! Reached maximum attempts ({MAX_CONSECUTIVE_RETRIES}) for {run_id}. Halting.", flush=True)
                     return False
 

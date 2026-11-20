@@ -28,6 +28,29 @@ def ste_quantize(x: torch.Tensor, scale, lo: int, hi: int) -> torch.Tensor:
     return y * scale
 
 
+def act_quant_bounds_and_scale(x: torch.Tensor, bits: int, unsigned: bool = False,
+                               scheme: str = "absmax", alpha: float | None = None) -> tuple[int, int, torch.Tensor]:
+    """Return (lo, hi, scale) in fp32 using one canonical per-token scale formula.
+
+    For mse_alpha, clamping after multiplying by alpha guarantees scale >= 1e-5 regardless
+    of alpha and keeps fake-quant outputs bit-exact with QLinear's exact-path stashes.
+    """
+    xd = x.detach().float()
+    if unsigned:
+        lo, hi = 0, 2 ** bits - 1
+    else:
+        lo, hi = -(2 ** (bits - 1)), 2 ** (bits - 1) - 1
+    if scheme == "absmax":
+        scale = xd.abs().amax(dim=-1, keepdim=True).clamp(min=1e-5) / hi
+    elif scheme == "mse_alpha":
+        if alpha is None:
+            raise ValueError("mse_alpha scheme requires an explicit alpha (calibrated in T5)")
+        scale = (alpha * xd.abs().mean(dim=-1, keepdim=True)).clamp(min=1e-5)
+    else:
+        raise ValueError(f"unknown activation scheme {scheme!r}")
+    return lo, hi, scale
+
+
 def ste_act_quantize(x: torch.Tensor, bits: int, unsigned: bool = False,
                      scheme: str = "absmax", alpha: float | None = None) -> torch.Tensor:
     """Per-token activation quantizer over the last (hidden) dimension.
@@ -37,22 +60,11 @@ def ste_act_quantize(x: torch.Tensor, bits: int, unsigned: bool = False,
     Residual caveat: under autocast the matmul still casts the dequantized values to bf16,
     so grid distortion persists until T5's integer-code matmul (spec, C1).
 
-    absmax (Phase 0): scale = max|x| / hi. mse_alpha (T5): scale = alpha * mean|x|.
+    absmax (Phase 0): scale = max|x| / hi. mse_alpha (T5): scale = (alpha * mean|x|).clamp(min=1e-5).
     Unsigned grid is used for the ReLU^2 output feeding mlp.c_proj (Plan v3.1 4.2).
     """
     x = x.float()
-    if unsigned:
-        lo, hi = 0, 2 ** bits - 1
-    else:
-        lo, hi = -(2 ** (bits - 1)), 2 ** (bits - 1) - 1
-    if scheme == "absmax":
-        scale = x.detach().abs().amax(dim=-1, keepdim=True).clamp(min=1e-5) / hi
-    elif scheme == "mse_alpha":
-        if alpha is None:
-            raise ValueError("mse_alpha scheme requires an explicit alpha (calibrated in T5)")
-        scale = alpha * x.detach().abs().mean(dim=-1, keepdim=True).clamp(min=1e-5)
-    else:
-        raise ValueError(f"unknown activation scheme {scheme!r}")
+    lo, hi, scale = act_quant_bounds_and_scale(x, bits, unsigned=unsigned, scheme=scheme, alpha=alpha)
     return ste_quantize(x, scale, lo, hi)
 
 
@@ -97,8 +109,9 @@ class QLinear(nn.Linear):
         if self._codes is None or self._codes_version != w._version or self._codes.device != w.device:
             with torch.no_grad():
                 if self.quant_mode == "ternary":
-                    gamma = w.abs().mean()
-                    codes = torch.clamp(torch.round(w / (gamma + 1e-5)), -1, 1)
+                    raw_mean = w.abs().mean()
+                    gamma = raw_mean.clamp(min=1e-5)
+                    codes = torch.clamp(torch.round(w / (raw_mean + 1e-5)), -1, 1)
                 else:
                     gamma = w.abs().max().clamp(min=1e-5) / 127.0
                     codes = torch.clamp(torch.round(w / gamma), -128, 127)
@@ -189,6 +202,8 @@ class _SSTEActQuant(torch.autograd.Function):
     def backward(ctx, grad_out):
         x, scale = ctx.saved_tensors
         lo, hi, sigma = ctx.lo, ctx.hi, ctx.sigma
+        if x.numel() == 0 or scale.numel() == 0:
+            return torch.zeros_like(x), None, None, None, None
         u = x / scale
         j0 = torch.clamp(torch.floor(u + 0.5), lo, hi)  # nearest code index centered in grid
         # Two corrections, both found by the 2026-11-06 probe session (P2's BP-SSTE
@@ -210,7 +225,8 @@ class _SSTEActQuant(torch.autograd.Function):
         #     That position-dependent loss is what broke the cosine at P2; the width is now
         #     tail-bounded so the sum is the derivative of the smoothed quantizer at any
         #     bit-width.
-        sigma_u = float((sigma / scale).max()) if scale.numel() else float(sigma / scale)
+        # Max across batch sets the vectorized loop bound; per-token pruning runs on `valid`.
+        sigma_u = float((sigma / scale).max())
         half = min(hi - lo, max(3, int(math.ceil(4.0 * sigma_u))))
         # Prune dead iterations: k = j0 + d must fall strictly in [lo + 1, hi].
         # Any d outside [lo + 1 - max(j0), hi - min(j0)] is guaranteed false everywhere.
@@ -238,18 +254,7 @@ def sste_act_quantize(x: torch.Tensor, bits: int, unsigned: bool = False,
                       alpha: float | None = None) -> torch.Tensor:
     """BP-SSTE variant of ste_act_quantize: same forward value, smoothed backward."""
     x = x.float()
-    if unsigned:
-        lo, hi = 0, 2 ** bits - 1
-    else:
-        lo, hi = -(2 ** (bits - 1)), 2 ** (bits - 1) - 1
-    if scheme == "absmax":
-        scale = x.detach().abs().amax(dim=-1, keepdim=True).clamp(min=1e-5) / hi
-    elif scheme == "mse_alpha":
-        if alpha is None:
-            raise ValueError("mse_alpha scheme requires an explicit alpha (calibrated in T5)")
-        scale = alpha * x.detach().abs().mean(dim=-1, keepdim=True).clamp(min=1e-5)
-    else:
-        raise ValueError(f"unknown activation scheme {scheme!r}")
+    lo, hi, scale = act_quant_bounds_and_scale(x, bits, unsigned=unsigned, scheme=scheme, alpha=alpha)
     return _SSTEActQuant.apply(x, scale, lo, hi, sigma)
 
 

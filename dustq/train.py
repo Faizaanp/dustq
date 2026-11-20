@@ -42,7 +42,7 @@ def evaluate(model, rows, device, dtype: str = "auto", batch_size: int = 32) -> 
     for batch in rows.split(batch_size):
         batch = batch.to(device)
         x, y = batch[:, :-1].contiguous(), batch[:, 1:].contiguous()
-        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_bf16):
+        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_bf16):
             loss = model(x, y)
         if not torch.isfinite(loss):
             raise FloatingPointError("Non-finite evaluation loss")
@@ -150,6 +150,11 @@ class Runner:
             # cfg.steps over it, so a truncated run sees exactly the full run's batches.
             default_steps = (DEFAULT_CONFIGS.get(cfg.tokens, {}) or {}).get("steps") \
                 or (BP_DEFAULTS.get(cfg.tokens, {}) or {}).get("steps")
+            if default_steps and cfg.steps > default_steps:
+                raise ValueError(
+                    f"cfg.steps={cfg.steps} exceeds the {cfg.tokens} dataset pool limit "
+                    f"({default_steps} steps = {default_steps * 8} sequences in train_{cfg.tokens}.pt)"
+                )
             rows_needed = max(cfg.steps, default_steps or cfg.steps) * 8
             train = load_sequences(Path(cfg.data_dir) / f"train_{cfg.tokens}.pt", rows_needed)
             order = torch.randperm(len(train), generator=torch.Generator().manual_seed(cfg.seed + 1))
@@ -180,11 +185,20 @@ class Runner:
 
     def _load_ckpt(self):
         payload = torch.load(self.ckpt_path, map_location=self.device, weights_only=False)
-        self.model.load_state_dict(payload["model"])
-        self.optimizer.load_state_dict(payload["optimizer"])
-        if self.estimator is not None and "generator" in payload:
+        state = payload["model"] if isinstance(payload, dict) and "model" in payload else payload
+        self.model.load_state_dict(state)
+        if isinstance(payload, dict) and "optimizer" in payload:
+            self.optimizer.load_state_dict(payload["optimizer"])
+        if self.estimator is not None and isinstance(payload, dict) and "generator" in payload:
             self.estimator.load_state_dict(payload["generator"])
-        return payload["step"], payload["best"], payload["history"], payload.get("wall_prior", 0.0)
+        if isinstance(payload, dict):
+            return (
+                payload.get("step", 0),
+                payload.get("best"),
+                payload.get("history", []),
+                payload.get("wall_prior", 0.0),
+            )
+        return 0, None, [], 0.0
 
     # ---------- training ----------
 
@@ -199,32 +213,46 @@ class Runner:
         self._t_seg = time.monotonic()
         start, best, history = 0, None, []
 
-        if self.ckpt_path.exists():
-            start, best, history, self._wall_prior = self._load_ckpt()
-            best_path = self.run_dir / "best.pt"
-            if best_path.exists():
-                try:  # C3: the file's best is authoritative after a crash
-                    best = min(best, load_best(best_path, self.device)[0])
-                except Exception:
-                    pass  # legacy bare best.pt: keep the ckpt value
-            if history_path.exists():  # M2: drop rows re-run after the last ckpt
-                kept = [l for l in history_path.read_text().splitlines()
-                        if l.strip() and json.loads(l).get("step", 0) <= start]
-                history_path.write_text("\n".join(kept) + ("\n" if kept else ""))
-            if start >= cfg.steps:
-                return self._finalize(best, history)
-        else:
-            (self.run_dir / "config.json").write_text(
-                json.dumps({**cfg.to_yaml_dict(), "git_commit": _git_commit(),
-                            "torch": torch.__version__,
-                            "gpu": torch.cuda.get_device_name(0) if self.device.type == "cuda" else "cpu"},
-                           indent=2) + "\n")
-            best = evaluate(self.model, self.val_rows, self.device, cfg.dtype)
-            self._save_best(best)
-            history = [dict(step=0, val_loss=best)]
-
-        t_start, t_ckpt = self._t_seg, time.monotonic()
         try:
+            if self.ckpt_path.exists():
+                start, best, history, self._wall_prior = self._load_ckpt()
+                best_path = self.run_dir / "best.pt"
+                if best_path.exists():
+                    try:  # C3: the file's best is authoritative after a crash
+                        file_best, _ = load_best(best_path, self.device)
+                        if file_best is not None and file_best > 0:
+                            best = file_best if best is None else min(best, file_best)
+                    except Exception:
+                        pass  # legacy bare best.pt: keep the ckpt value
+                if best is None:
+                    best = evaluate(self.model, self.val_rows, self.device, cfg.dtype)
+                    self._save_best(best)
+                if history_path.exists():  # M2: drop rows re-run after the last ckpt; guard truncated lines
+                    kept = []
+                    for line in history_path.read_text().splitlines():
+                        s = line.strip()
+                        if not s:
+                            continue
+                        try:
+                            rec = json.loads(s)
+                        except json.JSONDecodeError:
+                            continue
+                        if rec.get("step", 0) <= start:
+                            kept.append(s)
+                    history_path.write_text("\n".join(kept) + ("\n" if kept else ""))
+                if start >= cfg.steps:
+                    return self._finalize(best, history)
+            else:
+                (self.run_dir / "config.json").write_text(
+                    json.dumps({**cfg.to_yaml_dict(), "git_commit": _git_commit(),
+                                "torch": torch.__version__,
+                                "gpu": torch.cuda.get_device_name(0) if self.device.type == "cuda" else "cpu"},
+                               indent=2) + "\n")
+                best = evaluate(self.model, self.val_rows, self.device, cfg.dtype)
+                self._save_best(best)
+                history = [dict(step=0, val_loss=best)]
+
+            t_start, t_ckpt = self._t_seg, time.monotonic()
             for step in range(start + 1, cfg.steps + 1):
                 x, y = self._batch(step)
                 if cfg.method == "dust":

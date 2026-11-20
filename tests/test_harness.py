@@ -337,3 +337,115 @@ def test_drive_bridge_protocol(temp_dir):
     assert (bridge.processed_dir / "cmd_001.json").is_file()
     # Outbox should contain resp_cmd_001.json
     assert (bridge.outbox_dir / "resp_cmd_001.json").is_file()
+
+
+# =====================================================================
+# 5. Audit Regression Tests (B1, B3, B5, B6, C8, C9)
+# =====================================================================
+
+def test_preflight_verify_alpha_calibration_real_schema(temp_dir):
+    """B1 regression: verify_alpha_calibration must accept configs/alpha_calibrated.json's 'alpha' key."""
+    checker = PreflightChecker(temp_dir, temp_dir, temp_dir, require_cuda=False)
+    res = checker.verify_alpha_calibration()
+    assert res["passed"] is True, res
+    assert "a4s" in res["details"]["alpha"]
+
+
+def test_watchdog_catches_early_nan_skipped_and_completed(temp_dir):
+    """B6/C8/C9 regressions: detect earlier NaN lines, exit-0 without result, and valid result.json."""
+    run_dir = temp_dir / "run_1"
+    run_dir.mkdir(parents=True)
+    metrics_path = run_dir / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 1, "train_loss": float("nan")}) + "\n"
+        + json.dumps({"step": 2, "train_loss": 6.5}) + "\n"
+    )
+
+    class _MockProc:
+        def __init__(self, alive=True, exit_code=0):
+            self._alive = alive
+            self._exit_code = exit_code
+
+        def is_alive(self):
+            return self._alive
+
+        def get_exit_code(self):
+            return self._exit_code
+
+        def get_log_tail(self, _n=1500):
+            return ""
+
+        def terminate_gracefully(self, grace_period_s=10.0):
+            return self._exit_code
+
+    wd = TrainingWatchdog(run_dir=run_dir, process_mgr=_MockProc(alive=True))
+    status = wd.inspect()
+    assert not status.healthy and status.status_str == "nan_inf"  # C8: early NaN detected
+
+    # B6: exit 0 without result.json -> skipped (not crashed)
+    wd2 = TrainingWatchdog(run_dir=run_dir, process_mgr=_MockProc(alive=False, exit_code=0))
+    status2 = wd2.inspect()
+    assert status2.status_str == "skipped"
+
+    # C9: valid result.json -> completed even if process hasn't exited yet
+    (run_dir / "result.json").write_text(json.dumps({"best_val": 6.0, "steps": 61}))
+    wd3 = TrainingWatchdog(run_dir=run_dir, process_mgr=_MockProc(alive=True))
+    status3 = wd3.inspect()
+    assert status3.healthy and status3.status_str == "completed"
+
+
+def test_diagnostic_engine_no_double_attempt_count(temp_dir):
+    """B5 regression: do not increment FAILED_ATTEMPTS twice if queue.py already incremented it."""
+    run_dir = temp_dir / "run_dup"
+    run_dir.mkdir(parents=True)
+    # Simulate queue.py having already incremented FAILED_ATTEMPTS from 0 -> 1 before exiting
+    (run_dir / "FAILED_ATTEMPTS").write_text("1\nRuntimeError: boom\n")
+
+    class _MockProc:
+        def terminate_gracefully(self, grace_period_s=10.0):
+            return 1
+
+        def get_log_tail(self, _n=1500):
+            return "RuntimeError: boom"
+
+    inc = DiagnosticEngine.handle_failure(
+        run_dir=run_dir, run_id="run_dup", process_mgr=_MockProc(),
+        health=HealthStatus(healthy=False, status_str="crashed", error_message="boom"),
+        prior_attempts=0,
+    )
+    assert inc["attempts"] == 1
+    assert (run_dir / "FAILED_ATTEMPTS").read_text().splitlines()[0] == "1"
+
+
+def test_run_queue_exact_flag_avoids_prefix_collision(temp_dir, monkeypatch):
+    """B3 regression: run_queue(..., exact=True) matches only exact run_id, not prefix siblings."""
+    import yaml
+    from dustq.config import RunConfig
+    from dustq import queue as q_mod
+
+    cfg_dir = temp_dir / "cfgs"
+    cfg_dir.mkdir()
+    for dtype in ("auto", "fp32"):
+        c = RunConfig(task="smoke", size="tiny", tokens="1M", precision="fp",
+                      method="backprop", seed=0, dtype=dtype, data_dir="synthetic", steps=1).resolved()
+        (cfg_dir / f"{c.run_id}.yaml").write_text(yaml.safe_dump(c.to_yaml_dict()))
+
+    seen = []
+
+    class _FakeRunner:
+        def __init__(self, cfg, device=None):
+            seen.append(cfg.run_id)
+            self.run_dir = temp_dir / "res" / cfg.run_id
+            self.run_dir.mkdir(parents=True, exist_ok=True)
+
+        def train(self):
+            p = self.run_dir / "result.json"
+            p.write_text(json.dumps({"best_val": 5.0}))
+            return p
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(q_mod, "Runner", _FakeRunner)
+    q_mod.run_queue(cfg_dir, temp_dir / "res", only="tiny_1M_fp_backprop_K0_s0", exact=True)
+    assert seen == ["tiny_1M_fp_backprop_K0_s0"]

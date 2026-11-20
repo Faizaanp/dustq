@@ -33,13 +33,16 @@ def analyze_tuning(csv_path: Path) -> dict:
         reader = csv.DictReader(f)
         rows = list(reader)
 
-    # Filter to completed tuning runs
-    tune_rows = [
-        r for r in rows
-        if (r.get("task") == "tune" or "_tune" in r.get("run_id", ""))
-        and r.get("status") == "completed"
-        and parse_float(r.get("val_loss_best")) is not None
-    ]
+    # Filter to completed tuning runs; deduplicate by run_id keeping the latest entry
+    dedup_by_id = {}
+    for r in rows:
+        if (
+            (r.get("task") == "tune" or "_tune" in r.get("run_id", ""))
+            and r.get("status") == "completed"
+            and parse_float(r.get("val_loss_best")) is not None
+        ):
+            dedup_by_id[r.get("run_id")] = r
+    tune_rows = list(dedup_by_id.values())
 
     if not tune_rows:
         return {}
@@ -64,12 +67,13 @@ def analyze_tuning(csv_path: Path) -> dict:
 
     best_hparams = {}
     for cell_key, items in groups.items():
-        # Sort strictly by val_loss_best ascending (lower is better)
+        # Sort strictly by val_loss_best ascending (lower is better; AGENTS.md Rule 2)
         sorted_items = sorted(items, key=lambda x: float(x["val_loss_best"]))
         best = sorted_items[0]
 
         best_hparams[cell_key] = {
             "cell": cell_key,
+            "selection_criterion": "val_loss_best_only",
             "precision": best.get("precision"),
             "method": best.get("method"),
             "ste_mode": best.get("ste_mode"),
@@ -86,7 +90,7 @@ def analyze_tuning(csv_path: Path) -> dict:
                     "lr": float(x.get("lr")),
                     "momentum": float(x.get("momentum")),
                     "val_loss": float(x.get("val_loss_best")),
-                    "test_loss": parse_float(x.get("test_loss_at_best_val")),
+                    "test_loss_info_only": parse_float(x.get("test_loss_at_best_val")),
                 }
                 for x in sorted_items
             ],

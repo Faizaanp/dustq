@@ -131,6 +131,13 @@ for need, label in ((Path("data/train_1M.pt"), "data/train_1M.pt"),
         print(f"MISSING {label} — the probe session cannot start", flush=True)
         raise SystemExit(f"missing {label}")
 
+import json as _json
+_alpha_data = _json.loads(Path("configs/alpha_calibrated.json").read_text())
+_alphas = _alpha_data.get("alpha") or {}
+_missing_alpha = [k for k in ("a4s", "a4u", "a2s", "a2u") if k not in _alphas]
+if _missing_alpha:
+    raise SystemExit(f"configs/alpha_calibrated.json missing required 'alpha' keys: {_missing_alpha}")
+
 missing_p = []
 for run_id in S_PCKPTS + [M_P3]:
     ckpt = Path("results") / run_id / "best.pt"
@@ -205,13 +212,19 @@ STEPS.append((M_P3, "2,5"))                            # M
 STEPS.append((M_P3, "4"))                              # M Arm 2 directional descent
 
 PROBE_DIR = Path("results/probes")
-FORCE_PROBES = {p.strip() for p in os.environ.get("FORCE_PROBES", "4").split(",") if p.strip()}
+# Pass FORCE_PROBES=4 (or 2,4) in env only when intentionally refreshing already-completed probes.
+FORCE_PROBES = {p.strip() for p in os.environ.get("FORCE_PROBES", "").split(",") if p.strip()}
 
 
 def json_path(run_id: str, which: str) -> Path:
-    """The filename dustq.probes writes for this subset (same tag logic as probes.main)."""
-    tag = "-".join(str(p) for p in sorted(int(p) for p in which.split(",")))
-    return PROBE_DIR / f"{run_id}_probes_{tag}.json"
+    """The post-override filename dustq.probes writes for this config and subset."""
+    from dustq.config import load_config
+    from dustq.probes import probe_report_path
+
+    cfg = load_config(f"configs/{run_id}.yaml")
+    if DUST_FORWARD:
+        cfg.dust_forward = DUST_FORWARD
+    return probe_report_path(cfg, which, PROBE_DIR)
 
 
 SECTION_MAP = {

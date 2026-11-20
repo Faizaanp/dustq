@@ -1,5 +1,11 @@
 # Post-Fix Science Report: T6 Probe Results & Unambiguous Gate G2a Passage
 
+> **Rule-6 Dated Correction (2026-11-20):** Two headline readings in this report contain measurement artifacts identified in the 2026-11-20 code audit:
+> 1. **A1/A2 (`K=4096` disattenuated `1.0000`)**: `probe_cosine_ladders` reused `seed=0` for all $K$ rungs, making `K=4096` bit-identical to `g1` in `probe_reference` (`(g1+g2)/2`), which mathematically forces `disattenuated = 1.0` for every positive-$r_g$ group (`r_g` down to `0.003`). Raw $256 \to 1024$ trends remain unaffected by `K=4096` self-correlation, though rungs still shared `seed=0`.
+> 2. **A3/A4 (`49.1%` deeper val descent / `0.0025` nats)**: `probe_directional_descent` ran its 25-point $\varepsilon$ search directly on the single 8-sequence `ctx.vx, ctx.vy` batch (`seed=0`) it reported, making reported validation deltas in-batch selected minima without multi-batch/multi-seed uncertainty.
+> 
+> Code fixes (independent rung seeds $\ge 10000$, `MIN_RELIABILITY=0.2` floor, disjoint selection vs multi-batch reporting split, multi-seed Dust candidates, saved `norm`, and `cfg.dtype` respect) were applied to `dustq/probes.py` on 2026-11-20. Re-run Probe 2 and Probe 4 before citing these numbers in the paper.
+
 **Date**: 2026-11-14 (Post-Fix Cohort) `[code]`  
 **Governing Documents**: `AGENTS.md`, `docs/planning/Dust-Q Implementation Plan v3.md` (v3.1, §§5, 7, 8), `docs/reports/T6_AUDIT_2026-11-14.md` `[design]`  
 **Hardware Platform**: Google Colab NVIDIA L4 GPU (burn rate: 1.94 CU/h) `[code]`  

@@ -10,10 +10,11 @@ import pytest
 import torch
 
 from dustq.config import RunConfig
-from dustq.probes import (ProbeContext, _spearman_brown_sqrt, cosine_by_group, fit_cos_law,
+from dustq.probes import (MIN_RELIABILITY, ProbeContext, _spearman_brown_sqrt,
+                          cosine_by_group, fit_cos_law,
                           probe_cosine_ladders,
-                          probe_directional_descent, probe_reference, probe_seed_noise,
-                          probe_sigma_delta, probe_ste_bias)
+                          probe_directional_descent, probe_reference, probe_report_path,
+                          probe_seed_noise, probe_sigma_delta, probe_ste_bias)
 
 
 @pytest.fixture(scope="module")
@@ -66,12 +67,14 @@ def test_reference_and_ladders(ctx):
         for name, val in groups.items():
             assert set(val) == {"raw", "disattenuated", "r_g", "divisor"}
             assert -1.0 <= val["raw"] <= 1.0
-            if val["r_g"] is None or val["r_g"] <= 0:
+            if val["r_g"] is None or val["r_g"] < MIN_RELIABILITY:
                 assert val["disattenuated"] is None and val["divisor"] is None, val
             else:
                 d = math.sqrt(2 * val["r_g"] / (1 + val["r_g"]))
                 assert abs(val["divisor"] - d) < 1e-6, (name, val)
                 assert -1.0 <= val["disattenuated"] <= 1.0
+                expected_dis = max(-1.0, min(1.0, val["raw"] / d))
+                assert abs(val["disattenuated"] - expected_dis) < 1e-5, (name, val)
 
 
 def test_ste_bias_probe(ctx):
@@ -335,12 +338,60 @@ def test_ladders_disattenuate_by_spearman_brown_sqrt(ctx):
 
 
 def test_spearman_brown_edges():
-    """sqrt(2r/(1+r)): monotone in r, 0 at r=0, and None (not a number) for r<=0."""
-    from dustq.probes import _spearman_brown_sqrt
-
+    """sqrt(2r/(1+r)): monotone in r above MIN_RELIABILITY, None below threshold or r<=0."""
     assert _spearman_brown_sqrt(-0.5) is None
     assert _spearman_brown_sqrt(0.0) is None
+    assert _spearman_brown_sqrt(0.05) is None
     assert _spearman_brown_sqrt(None) is None
-    assert abs(_spearman_brown_sqrt(1.0) - 1.0) < 1e-12          # perfect halves
-    assert 0 < _spearman_brown_sqrt(0.05) < _spearman_brown_sqrt(0.25) < \
+    assert abs(_spearman_brown_sqrt(1.0) - 1.0) < 1e-12
+    assert 0 < _spearman_brown_sqrt(0.05, min_r_g=0.0) < _spearman_brown_sqrt(0.25) < \
         _spearman_brown_sqrt(0.9) < 1.0
+
+
+def test_ladder_rung_seeds_disjoint_from_reference(monkeypatch, ctx):
+    """A1/A2 regression: ladder rungs must never reuse seed=0/5000 from probe_reference."""
+    recorded_seeds = []
+
+    def fake_dust_grads(seed, population=256, sigmas=None, apply_update=False):
+        recorded_seeds.append((population, seed))
+        return {"mlp.c_fc.weight": torch.ones(4)}
+
+    ref = {"mlp.c_fc.weight": torch.ones(4)}
+    r_g = {"MLP in": 0.5}
+    monkeypatch.setattr(ctx, "dust_grads", fake_dust_grads)
+    probe_cosine_ladders(ctx, populations=(256, 1024, 4096), reference=ref, r_g=r_g)
+    seeds_only = [s for _, s in recorded_seeds]
+    assert len(set(seeds_only)) == 3, f"Rungs reused seeds: {recorded_seeds}"
+    assert 0 not in seeds_only and 5000 not in seeds_only, f"Rung collided with reference seeds: {recorded_seeds}"
+
+
+def test_probe4_disjoint_selection_and_norm(ctx):
+    """A3/A4/A7 regression: selection split eps* is evaluated on disjoint report batches with std/se/norm."""
+    cand = {"STE": ctx.bp_grads("identity")}
+    rep_batches = [
+        (ctx.vx.clone(), ctx.vy.clone()),
+        (ctx.x.clone(), ctx.y.clone()),
+    ]
+    dd = probe_directional_descent(ctx, cand, grid=2, val_batches=rep_batches)
+    entry = dd["STE"]
+    assert "norm" in entry and entry["norm"] > 0
+    assert entry["val_report_n"] == 2
+    assert len(entry["val_per_batch"]) == 2
+    assert abs(entry["val"][0] - sum(entry["val_per_batch"]) / 2) < 1e-12
+    assert "val_at_train_eps" in entry and "val_selected_in_batch" in entry
+
+
+def test_probe_report_path_post_override(tmp_path):
+    """B2 regression: resolved filename reflects post-override dust_forward and task."""
+    import yaml
+
+    cfg_path = tmp_path / "L8d512_1M_w1p58a4_dust_K256_s0.yaml"
+    cfg_path.write_text(yaml.safe_dump({
+        "task": "G1", "size": "L8d512", "tokens": "1M", "precision": "w1.58a4",
+        "method": "dust", "population": 256, "seed": 0,
+    }))
+    from dustq.config import load_config
+    cfg = load_config(cfg_path)
+    cfg.dust_forward = "fake"
+    out = probe_report_path(cfg, "2,5", tmp_path)
+    assert out.name == "L8d512_1M_w1p58a4_dust_K256_s0_fake_G1_probes_2-5.json"

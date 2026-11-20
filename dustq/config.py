@@ -48,7 +48,7 @@ def sanitize(name: str) -> str:
 class RunConfig:
     task: str = "smoke"
     size: str = "L4d256"                 # key of SIZES, or "tiny" for the CPU acceptance model
-    tokens: str = "1M"                   # 1M | 10M | 20M (20M needs dustq/data.py)
+    tokens: str = "1M"                   # 1M | 10M (20M deferred — not in DEFAULT_CONFIGS / data prep)
     precision: str = "fp"                # fp | w8a8 | w1.58a8 | w1.58a4 | w1.58a2
     method: str = "dust"                # dust | backprop
     population: int = 256               # ignored (K0) for backprop
@@ -73,10 +73,23 @@ class RunConfig:
     def resolved(self) -> "RunConfig":
         cfg = RunConfig(**asdict(self))
         if cfg.method == "dust":
-            cell = dust.DEFAULT_CONFIGS[cfg.tokens]["optimizer"][cfg.population]
-            defaults_steps = dust.DEFAULT_CONFIGS[cfg.tokens]["steps"]
-            defaults_eval = dust.DEFAULT_CONFIGS[cfg.tokens]["eval_interval"]
+            if cfg.tokens not in dust.DEFAULT_CONFIGS:
+                raise ValueError(
+                    f"Unsupported tokens budget {cfg.tokens!r}; expected one of {tuple(dust.DEFAULT_CONFIGS)}"
+                )
+            token_cfg = dust.DEFAULT_CONFIGS[cfg.tokens]
+            if cfg.population not in token_cfg["optimizer"]:
+                raise ValueError(
+                    f"Unsupported Dust population K={cfg.population!r}; expected one of {tuple(token_cfg['optimizer'])}"
+                )
+            cell = token_cfg["optimizer"][cfg.population]
+            defaults_steps = token_cfg["steps"]
+            defaults_eval = token_cfg["eval_interval"]
         else:
+            if cfg.tokens not in BP_DEFAULTS:
+                raise ValueError(
+                    f"Unsupported tokens budget {cfg.tokens!r}; expected one of {tuple(BP_DEFAULTS)}"
+                )
             cell = BP_DEFAULTS[cfg.tokens]
             defaults_steps, defaults_eval = cell["steps"], cell["eval_interval"]
         cfg.lr = cfg.lr if cfg.lr is not None else cell["lr"]
@@ -125,6 +138,8 @@ class RunConfig:
 
 def load_config(path: str | Path) -> RunConfig:
     raw = yaml.safe_load(Path(path).read_text())
+    if not isinstance(raw, dict):
+        raise ValueError(f"Config YAML {path} is empty or not a valid YAML mapping")
     raw.pop("run_id", None)  # informational only; derived from the fields
     # Keep only fields known to RunConfig dataclass for backwards compatibility with legacy YAMLs
     import dataclasses

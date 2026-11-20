@@ -18,12 +18,15 @@ def main():
     parser.add_argument("--configs-dir", default="configs")
     parser.add_argument("--results-dir", default="results")
     parser.add_argument("--only", help="run only configs whose run_id contains this substring")
+    parser.add_argument("--exact", action="store_true",
+                        help="require --only to match cfg.run_id exactly (avoids prefix collisions)")
     parser.add_argument("--cu-burn-rate", default="", help="CU/h observed in the Colab Resources tab")
     parser.add_argument("--retry-failed", action="store_true",
                         help="reset FAILED_ATTEMPTS markers for matching runs and retry them")
     args = parser.parse_args()
     for line in run_queue(args.configs_dir, args.results_dir, only=args.only,
-                          cu_burn_rate=args.cu_burn_rate, retry_failed=args.retry_failed):
+                          cu_burn_rate=args.cu_burn_rate, retry_failed=args.retry_failed,
+                          exact=args.exact):
         print(line, flush=True)
 
 

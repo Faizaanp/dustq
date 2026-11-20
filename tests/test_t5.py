@@ -372,3 +372,49 @@ def test_tf32_int_matmul_restores_previous_flag():
             assert torch.equal(out, a @ b)
     finally:
         torch.backends.cuda.matmul.allow_tf32 = prior
+
+
+def test_hook_scale_matches_act_quantizer_near_zero():
+    """A8 regression: register_act_hooks stashed scale must match ste/sste_act_quantize for small activations."""
+    from dustq.quant import act_quant_bounds_and_scale
+
+    # Near-dead tokens where clamp(min=1e-5) before vs after alpha* differs (a8s alpha=0.0476, a4u alpha=3.31)
+    x = torch.full((2, 4, 16), 5e-6)
+    fp32_floor = torch.tensor(1e-5, dtype=torch.float32).item()
+    for bits, unsigned, alpha in ((4, True, 3.3113), (8, False, 0.0476)):
+        lo, hi, scale = act_quant_bounds_and_scale(x, bits, unsigned=unsigned, scheme="mse_alpha", alpha=alpha)
+        assert float(scale.min()) >= fp32_floor
+        # Verify register_act_hooks formula produces bit-exact stashed codes * scale == ste/sste outputs
+        codes = torch.clamp(torch.round(x / scale), lo, hi)
+        deq = codes * scale
+        assert torch.equal(deq, ste_act_quantize(x, bits, unsigned=unsigned, scheme="mse_alpha", alpha=alpha))
+        assert torch.equal(deq, sste_act_quantize(x, bits, unsigned=unsigned, scheme="mse_alpha", alpha=alpha))
+
+    # Also test end-to-end hook stash on a Linear module via register_act_hooks
+    class _Cfg:
+        n_layer = 2
+    class _TinyWrap(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = _Cfg()
+            self.mlp = torch.nn.Module()
+            self.mlp.c_proj = torch.nn.Linear(16, 8, bias=False)
+            self.mlp.c_fc = torch.nn.Linear(16, 16, bias=False)
+    mod = _TinyWrap()
+    handles = qmodel.register_act_hooks(mod, 4, scheme="mse_alpha", alpha=3.3113)
+    try:
+        out_u = mod.mlp.c_proj(x)
+        stashed_deq = mod.mlp.c_proj._act_codes * mod.mlp.c_proj._act_scale
+        assert torch.equal(stashed_deq, ste_act_quantize(x, 4, unsigned=True, scheme="mse_alpha", alpha=3.3113))
+        assert torch.isfinite(out_u).all()
+    finally:
+        for h in handles:
+            h.remove()
+
+
+def test_sste_backward_empty_tensor():
+    """D1 regression: empty tensor must not raise RuntimeError on float(sigma / scale)."""
+    x = torch.empty((0, 16), requires_grad=True)
+    y = sste_act_quantize(x, 4, scheme="absmax", sigma=0.2)
+    y.sum().backward()
+    assert x.grad is not None and x.grad.shape == (0, 16)

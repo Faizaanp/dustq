@@ -59,7 +59,8 @@ def load_best(path, map_location):
     except Exception:
         payload = torch.load(path, map_location=map_location)
     if isinstance(payload, dict) and "state" in payload:
-        return float(payload.get("best", 0.0)), payload["state"]
+        raw_best = payload.get("best")
+        return (0.0 if raw_best is None else float(raw_best)), payload["state"]
     # Legacy bare state_dict (upstream format)
     return 0.0, payload
 
@@ -86,6 +87,8 @@ class Runner:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.ckpt_path = self.run_dir / "ckpt.pt"
         self.model = self.estimator = self.optimizer = None
+        self._best_state = None
+        self._best_dirty = False
         self._wall_prior = 0.0   # cumulative wall of all PREVIOUS segments (resume)
         self._t_seg = None       # this segment's start; wall_s = _wall_prior + segment elapsed
 
@@ -93,6 +96,10 @@ class Runner:
 
     def _build(self):
         cfg = self.cfg
+        if self.device.type == "cuda":
+            # Match upstream dust.py / baselines/backprop.py TF32 policy for auto dtype;
+            # keep strict fp32 ('highest') when cfg.dtype == 'fp32' (G1 exact checks).
+            torch.set_float32_matmul_precision("highest" if cfg.dtype == "fp32" else "high")
         self.model = build_model(cfg.model_kwargs(), cfg.precision, self.device, cfg.seed)
         if cfg.method == "dust":
             self.model.requires_grad_(False)
@@ -268,12 +275,13 @@ class Runner:
                     record["val_loss"] = value
                     if best is None or value < best:
                         best = value
-                        self._save_best(best)
+                        self._record_best(best)
                     history.append(record)
                     val_str = f"val={value:.4f} (best={best:.4f})"
                     print(f"[{cfg.run_id}] step {step:>4d}/{cfg.steps} | train_loss={loss:.4f} | {val_str} | elapsed={record['elapsed_seconds']:.1f}s", flush=True)
                 if step == cfg.steps or cfg.checkpoint_minutes <= 0 or \
                         (time.monotonic() - t_ckpt) >= cfg.checkpoint_minutes * 60:
+                    self._flush_best(best)
                     self._save_ckpt(step, best, history)
                     t_ckpt = time.monotonic()
                 with history_path.open("a") as stream:
@@ -284,6 +292,7 @@ class Runner:
                     self.estimator.close()
                 except Exception:
                     pass
+        self._flush_best(best)
         return self._finalize(best, history)
 
     def close(self):
@@ -296,19 +305,33 @@ class Runner:
         self.model = None
         self.optimizer = None
         self.estimator = None
+        self._best_state = None
+        self._best_dirty = False
         self.training = None
         self.targets = None
         self.val_rows = None
         self.test_rows = None
 
-    def _save_best(self, best: float):
-        """C3: single self-describing file, atomic via tmp+replace — upstream's bare
-        state_dict format is NOT used (see load_best and REPO_MAP)."""
-        payload = {"best": float(best),
-                   "state": {k: v.detach().cpu() for k, v in self.model.state_dict().items()}}
+    def _record_best(self, best: float):
+        """Snapshot best weights in CPU RAM; flushed to Drive at checkpoints + finalize
+        to avoid ~30 synchronous FUSE writes during fast 1M backprop runs."""
+        self._best_state = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
+        self._best_dirty = True
+
+    def _flush_best(self, best: float | None):
+        if not self._best_dirty or self._best_state is None or best is None:
+            return
+        payload = {"best": float(best), "state": self._best_state}
         tmp = self.run_dir / "best.pt.tmp"
         torch.save(payload, tmp)
         tmp.replace(self.run_dir / "best.pt")
+        self._best_dirty = False
+
+    def _save_best(self, best: float):
+        """C3: single self-describing file, atomic via tmp+replace — upstream's bare
+        state_dict format is NOT used (see load_best and REPO_MAP)."""
+        self._record_best(best)
+        self._flush_best(best)
 
     def _finalize(self, best, history) -> Path:
         file_best, state = load_best(self.run_dir / "best.pt", self.device)

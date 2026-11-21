@@ -92,6 +92,8 @@ class QLinear(nn.Linear):
         self._codes_t = None
         self._gamma = None
         self._w_delta = None
+        self._w_eff = None
+        self._w_eff_bf16 = None
         self._codes_version = -1
         # Activation stashes set by the act-quant pre-hook (DUST exact path + probe 5):
         # codes/scale for the exact matmul, `raw` for the pre-quantization input that any
@@ -116,6 +118,8 @@ class QLinear(nn.Linear):
                     gamma = w.abs().max().clamp(min=1e-5) / 127.0
                     codes = torch.clamp(torch.round(w / gamma), -128, 127)
                 self._w_delta = (gamma * codes - w).detach()
+                self._w_eff = (w + self._w_delta).detach()
+                self._w_eff_bf16 = self._w_eff.to(torch.bfloat16) if w.is_cuda else None
                 self._codes_t = codes.t()
             self._codes, self._gamma = codes, gamma
             self._codes_version = w._version
@@ -126,7 +130,21 @@ class QLinear(nn.Linear):
         latent weight (codes/gamma are cached constants detached from the graph)."""
         if self._w_delta is None or self._codes_version != self.weight._version or (self._codes is not None and self._codes.device != self.weight.device):
             self._codes_and_gamma()
+        if not torch.is_grad_enabled():
+            return self._w_eff
         return self.weight + self._w_delta
+
+    def _fake_linear(self, x: torch.Tensor) -> torch.Tensor:
+        w_eff = self.effective_weight()
+        if (
+            not torch.is_grad_enabled()
+            and x.is_cuda
+            and self._w_eff_bf16 is not None
+            and torch.is_autocast_enabled("cuda")
+            and torch.get_autocast_dtype("cuda") == torch.bfloat16
+        ):
+            w_eff = self._w_eff_bf16
+        return F.linear(x, w_eff, self.bias)
 
     def _exact_forward(self, x):
         """Integer-code path (T5/4.2): used when no backward is needed (DUST's forward-only
@@ -144,7 +162,7 @@ class QLinear(nn.Linear):
         """
         codes, gamma = self._codes_and_gamma()
         if self._exact_mode == "fake":
-            return F.linear(x, self.effective_weight(), self.bias)
+            return self._fake_linear(x)
         codes_t = self._codes_t if self._codes_t is not None else codes.t()
         act_codes = self._act_codes.to(torch.float32)
         # R8: PyTorch autocast on GPU silently downcasts fp32 @ to bfloat16, destroying
@@ -171,7 +189,50 @@ class QLinear(nn.Linear):
         self._act_codes = None
         self._act_scale = None
         self._act_raw = None
-        return F.linear(x, self.effective_weight(), self.bias)
+        return self._fake_linear(x)
+
+
+def _sste_euler_maclaurin(u: torch.Tensor, sigma_u: torch.Tensor, lo: int, hi: int) -> torch.Tensor:
+    """Closed-form Euler-Maclaurin midpoint formula for
+        sum_{k=lo+1}^{hi} phi((u - (k - 0.5)) / sigma_u) / sigma_u
+    Max absolute error across the full real line (interior + clamp boundaries + tails) is
+    < 8.4e-6 for sigma_u >= 3.0 and < 1.1e-7 for sigma_u >= 20 (fp32 machine precision),
+    avoiding O(sigma_u) boundary loops (~160-255 iterations at A8) in O(1) GPU ops."""
+    inv_su = 1.0 / sigma_u
+    inv_s2 = inv_su * (1.0 / math.sqrt(2.0))
+    u_lo = u - lo
+    u_hi = u - hi
+    cdf = 0.5 * (torch.erf(u_lo * inv_s2) - torch.erf(u_hi * inv_s2))
+    c0 = inv_su * (1.0 / math.sqrt(2.0 * math.pi))
+    z_lo = (u_lo * inv_su).clamp(-20.0, 20.0)
+    z_hi = (u_hi * inv_su).clamp(-20.0, 20.0)
+    fp_lo = (z_lo * inv_su) * c0 * torch.exp(-0.5 * z_lo.square())
+    fp_hi = (z_hi * inv_su) * c0 * torch.exp(-0.5 * z_hi.square())
+    return (cdf - (1.0 / 24.0) * (fp_hi - fp_lo)).clamp(min=0.0)
+
+
+def _sste_boundary_sum(x: torch.Tensor, scale: torch.Tensor, u: torch.Tensor,
+                       lo: int, hi: int, sigma: float, sigma_u_max: float) -> torch.Tensor:
+    """Exact discrete Gaussian boundary sum for narrow-sigma tokens (sigma_u < 3.0,
+    where half <= 15 so the loop has at most 31 iterations; <= 15 at A4, <= 3 at A2)."""
+    j0 = torch.clamp(torch.floor(u + 0.5), lo, hi)
+    j0_max, j0_min = torch.stack([j0.max(), j0.min()]).tolist()
+    half = min(hi - lo, max(3, int(math.ceil(5.0 * sigma_u_max))))
+    d_min = max(-half, int(math.floor(lo + 1 - j0_max)))
+    d_max = min(half, int(math.ceil(hi - j0_min)))
+    gx = torch.zeros_like(x)
+    if d_min <= d_max:
+        inv_norm = scale / (sigma * math.sqrt(2 * math.pi))
+        inv_2sigma2 = -0.5 / (sigma ** 2)
+        for d in range(d_min, d_max + 1):
+            k = j0 + d                       # boundary sits between codes k-1 and k
+            b = k - 0.5
+            valid = (k >= lo + 1) & (k <= hi)
+            diff = x - scale * b
+            bump = torch.exp(diff.square() * inv_2sigma2)
+            gx.add_(torch.where(valid, bump, 0.0))
+        gx.mul_(inv_norm)
+    return gx
 
 
 class _SSTEActQuant(torch.autograd.Function):
@@ -192,8 +253,9 @@ class _SSTEActQuant(torch.autograd.Function):
     derivative at A8; see the backward docstring and docs/reports T6)."""
 
     @staticmethod
-    def forward(ctx, x, scale, lo, hi, sigma):
-        codes = torch.clamp(torch.round(x / scale), lo, hi)
+    def forward(ctx, x, scale, lo, hi, sigma, codes=None):
+        if codes is None:
+            codes = torch.clamp(torch.round(x / scale), lo, hi)
         ctx.save_for_backward(x, scale)
         ctx.lo, ctx.hi, ctx.sigma = lo, hi, sigma
         return codes * scale
@@ -203,9 +265,9 @@ class _SSTEActQuant(torch.autograd.Function):
         x, scale = ctx.saved_tensors
         lo, hi, sigma = ctx.lo, ctx.hi, ctx.sigma
         if x.numel() == 0 or scale.numel() == 0:
-            return torch.zeros_like(x), None, None, None, None
-        u = x / scale
-        j0 = torch.clamp(torch.floor(u + 0.5), lo, hi)  # nearest code index centered in grid
+            return torch.zeros_like(x), None, None, None, None, None
+        inv_scale = 1.0 / scale
+        u = x * inv_scale
         # Two corrections, both found by the 2026-11-06 probe session (P2's BP-SSTE
         # collapsed to Attn out -0.045 while BP-STE held 0.87):
         #
@@ -222,31 +284,33 @@ class _SSTEActQuant(torch.autograd.Function):
         # (2) THE TRUNCATION. The sum used a fixed +/-3 boundaries, valid only while
         #     sigma/Delta <~ 1.5. Dust's inherited sigmas (0.05-0.4) are 5-40 code steps
         #     wide on the A8 grid, where the truncation kept 14-40% of the true derivative.
-        #     That position-dependent loss is what broke the cosine at P2; the width is now
-        #     tail-bounded so the sum is the derivative of the smoothed quantizer at any
-        #     bit-width.
-        # Max across batch sets the vectorized loop bound; per-token pruning runs on `valid`.
-        sigma_u = float((sigma / scale).max())
-        half = min(hi - lo, max(3, int(math.ceil(4.0 * sigma_u))))
-        # Prune dead iterations: k = j0 + d must fall strictly in [lo + 1, hi].
-        # Any d outside [lo + 1 - max(j0), hi - min(j0)] is guaranteed false everywhere.
-        d_min = max(-half, int(math.floor((lo + 1 - j0.max().item()))))
-        d_max = min(half, int(math.ceil((hi - j0.min().item()))))
-        gx = torch.zeros_like(x)
-        if d_min <= d_max:
-            inv_norm = scale / (sigma * math.sqrt(2 * math.pi))
-            inv_2sigma2 = -0.5 / (sigma ** 2)
-            four_sigma_over_scale = 4.0 * (sigma / scale)
-            for d in range(d_min, d_max + 1):
-                k = j0 + d                       # boundary sits between codes k-1 and k
-                b = k - 0.5
-                valid = (k >= lo + 1) & (k <= hi) & ((u - b).abs() <= four_sigma_over_scale)
-                if not valid.any():
-                    continue
-                diff = x - scale * b
-                bump = torch.exp(diff.square() * inv_2sigma2) * inv_norm
-                gx = gx + torch.where(valid, bump, torch.zeros_like(bump))
-        return grad_out * gx, None, None, None, None
+        #     That position-dependent loss is what broke the cosine at P2; wide-sigma tokens
+        #     (sigma_u >= 3.0) now use the exact O(1) Euler-Maclaurin formula (<8.4e-6 error)
+        #     and narrow-sigma tokens use the exact tail-bounded boundary sum (half <= 12).
+        sigma_over_scale = sigma * inv_scale
+        su_min, su_max = torch.stack([sigma_over_scale.min(), sigma_over_scale.max()]).tolist()
+        if su_min >= 3.0:
+            gx = _sste_euler_maclaurin(u, sigma_over_scale, lo, hi)
+        elif su_max < 3.0:
+            gx = _sste_boundary_sum(x, scale, u, lo, hi, sigma, su_max)
+        else:
+            # Mixed regime: O(1) Euler-Maclaurin on wide tokens, bounded (half<=15) sum on narrow tokens
+            gx = _sste_euler_maclaurin(u, sigma_over_scale, lo, hi)
+            narrow = (sigma_over_scale < 3.0).expand_as(x)
+            # Only evaluate narrow tokens by flattening along non-channel dims when scale is per-token
+            if scale.ndim == x.ndim and scale.shape[-1] == 1:
+                tok_mask = (sigma_over_scale.squeeze(-1) < 3.0)
+                idx = tok_mask.nonzero(as_tuple=False)
+                if idx.numel() > 0:
+                    x_n = x[tok_mask]
+                    s_n = scale[tok_mask]
+                    u_n = u[tok_mask]
+                    gx_n = _sste_boundary_sum(x_n, s_n, u_n, lo, hi, sigma, 3.0)
+                    gx[tok_mask] = gx_n
+            else:
+                gx_n = _sste_boundary_sum(x, scale, u, lo, hi, sigma, 3.0)
+                gx = torch.where(narrow, gx_n, gx)
+        return grad_out * gx, None, None, None, None, None
 
 
 def sste_act_quantize(x: torch.Tensor, bits: int, unsigned: bool = False,

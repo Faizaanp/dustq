@@ -418,3 +418,105 @@ def test_sste_backward_empty_tensor():
     y = sste_act_quantize(x, 4, scheme="absmax", sigma=0.2)
     y.sum().backward()
     assert x.grad is not None and x.grad.shape == (0, 16)
+
+
+def test_sste_backward_chunked_matches_scalar_loop():
+    """Euler-Maclaurin + narrow-sigma SSTE backward must match exact scalar boundary sum across
+    narrow (sigma_u < 3), wide (sigma_u >= 3), and mixed-token batches at A4 and A8."""
+    torch.manual_seed(11)
+    cases = [
+        (-8, 7, 0.2, None),
+        (-128, 127, 0.2, None),
+        (0, 255, 0.4, None),
+        # Mixed batch: half tokens narrow (sigma_u ~ 1.0), half wide (sigma_u ~ 15.0)
+        (-128, 127, 0.2, torch.cat([torch.full((2, 16, 1), 0.2), torch.full((2, 16, 1), 0.013)], dim=0)),
+    ]
+    for lo, hi, sigma, custom_scale in cases:
+        x = torch.randn(4, 16, 32, requires_grad=True)
+        scale = custom_scale if custom_scale is not None else (
+            x.detach().abs().amax(dim=-1, keepdim=True).clamp(min=1e-5) / hi
+        )
+        grad_out = torch.randn_like(x)
+        y = _SSTEActQuant.apply(x, scale, lo, hi, sigma)
+        y.backward(grad_out)
+        gx_opt = x.grad.clone()
+
+        # Independent reference: exact untruncated discrete sum over all interior boundaries k = lo+1..hi
+        with torch.no_grad():
+            inv_norm = scale / (sigma * math.sqrt(2 * math.pi))
+            inv_2sigma2 = -0.5 / (sigma ** 2)
+            gx_ref = torch.zeros_like(x)
+            for k in range(lo + 1, hi + 1):
+                b = k - 0.5
+                diff = x.detach() - scale * b
+                gx_ref = gx_ref + torch.exp(diff.square() * inv_2sigma2) * inv_norm
+            gx_ref = grad_out * gx_ref
+        # Exact sum agrees within 4-sigma truncation (~1e-4 on narrow tokens) or <1e-5 on Euler-Maclaurin
+        assert torch.allclose(gx_opt, gx_ref, rtol=2e-4, atol=2e-4), (lo, hi, (gx_opt - gx_ref).abs().max())
+
+
+def test_qkv_shared_quant_matches_independent_and_preserves_grad():
+    """Shared Q/K/V pre-hook cache must match independent per-linear quantization in both
+    no_grad (DUST) and grad (BP-STE / BP-SSTE) modes."""
+    for ste_mode in ("identity", "smoothed"):
+        torch.manual_seed(17)
+        m_shared = runner.build_model(precision="w1.58a4", seed=3)
+        m_ref = runner.build_model(precision="w1.58a4", seed=3)
+        qmodel.register_act_hooks(m_shared, 4, "absmax", allow_lowbit_absmax=True, ste_mode=ste_mode)
+
+        # Attach independent unshared hooks to m_ref as ground truth
+        n_layer = m_ref.config.n_layer
+        for name, mod in m_ref.named_modules():
+            site = qmodel._site_matches(name, qmodel.ACT_QUANT_SITES)
+            if site is None or not isinstance(mod, torch.nn.Linear):
+                continue
+            unsigned = qmodel.site_unsigned(name)
+            sigma = qmodel.site_sigma(name, n_layer)
+            def _make_ref(unsigned=unsigned, sigma=sigma, ste_mode=ste_mode):
+                def _h(_m, args):
+                    x = args[0]
+                    if not x.is_floating_point():
+                        return args
+                    if ste_mode == "smoothed":
+                        return (sste_act_quantize(x, 4, unsigned=unsigned, scheme="absmax", sigma=sigma),)
+                    return (ste_act_quantize(x, 4, unsigned=unsigned, scheme="absmax"),)
+                return _h
+            mod.register_forward_pre_hook(_make_ref())
+
+        x, y = runner.tiny_batch(torch.device("cpu"), seed=19)
+        with torch.no_grad():
+            l_shared = m_shared(x, y)
+            l_ref = m_ref(x, y)
+        assert torch.allclose(l_shared, l_ref, rtol=1e-6, atol=1e-6), (ste_mode, l_shared, l_ref)
+
+        # Verify exact gradient parity on c_q, c_k, c_v and upstream wte
+        m_shared.requires_grad_(True)
+        m_ref.requires_grad_(True)
+        m_shared(x, y).backward()
+        m_ref(x, y).backward()
+        for name in ("transformer.h.0.attn.c_q.weight",
+                     "transformer.h.0.attn.c_k.weight",
+                     "transformer.h.0.attn.c_v.weight",
+                     "transformer.wte.weight"):
+            p_s = dict(m_shared.named_parameters())[name]
+            p_r = dict(m_ref.named_parameters())[name]
+            assert p_s.grad is not None and torch.isfinite(p_s.grad).all()
+            assert torch.allclose(p_s.grad, p_r.grad, rtol=1e-5, atol=1e-5), (
+                ste_mode, name, (p_s.grad - p_r.grad).abs().max()
+            )
+
+
+def test_qlinear_cached_w_eff_exact_and_invalidates():
+    """Cached _w_eff under no_grad must match effective_weight() under grad bitwise."""
+    torch.manual_seed(23)
+    q = QLinear(16, 8, mode="ternary")
+    q.weight.data.normal_()
+    w_grad = q.effective_weight().detach().clone()
+    with torch.no_grad():
+        w_nograd = q.effective_weight()
+        assert w_nograd is q._w_eff
+        assert torch.equal(w_nograd, w_grad)
+        q.weight.add_(0.25)
+        w_after = q.effective_weight()
+    assert not torch.equal(w_after, w_grad)
+    assert torch.equal(w_after, q.effective_weight().detach())

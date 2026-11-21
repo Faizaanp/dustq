@@ -228,7 +228,11 @@ class PreflightChecker:
 class CheckpointValidator:
     """Validates structural and numerical integrity of ckpt.pt and best.pt [design]."""
 
-    REQUIRED_CKPT_KEYS = {"model", "optimizer", "step", "best", "history", "wall_prior"}
+    # F7: align strictly with Runner._load_ckpt's tolerance so legacy-but-resumable checkpoints
+    # (missing optimizer/history/wall_prior/generator or having best=None) are NOT marked invalid
+    # and deleted on the Stage 5 restart path.
+    REQUIRED_CKPT_KEYS = {"model"}
+    OPTIONAL_CKPT_KEYS = {"optimizer", "step", "best", "history", "wall_prior"}
 
     @staticmethod
     def inspect_checkpoint(ckpt_path: Path, is_dust: bool = False) -> Dict[str, Any]:
@@ -237,11 +241,13 @@ class CheckpointValidator:
             "path": str(ckpt_path),
             "exists": False,
             "valid": False,
+            "legacy": False,
             "step": None,
             "best": None,
             "num_params": 0,
             "non_finite_tensors": [],
             "missing_keys": [],
+            "warnings": [],
             "error": None,
         }
 
@@ -259,20 +265,33 @@ class CheckpointValidator:
                 report["error"] = f"Checkpoint payload is not a dict: {type(payload)}"
                 return report
 
-            missing = [k for k in CheckpointValidator.REQUIRED_CKPT_KEYS if k not in payload]
-            if is_dust and "generator" not in payload:
-                missing.append("generator (required for exact Dust noise stream)")
-
-            if missing:
-                report["missing_keys"] = missing
-                report["error"] = f"Missing required checkpoint keys: {missing}"
+            # Support both modern wrapped checkpoints ({"model": state_dict, ...}) and
+            # legacy bare state_dicts ({param_name: Tensor}), matching Runner._load_ckpt.
+            if "model" in payload and isinstance(payload["model"], dict):
+                model_state = payload["model"]
+                optional_missing = [k for k in sorted(CheckpointValidator.OPTIONAL_CKPT_KEYS) if k not in payload]
+                if is_dust and "generator" not in payload:
+                    optional_missing.append("generator")
+                if optional_missing:
+                    report["legacy"] = True
+                    report["warnings"].append(f"Legacy/partial checkpoint missing optional keys: {optional_missing}")
+                raw_step = payload.get("step")
+                raw_best = payload.get("best")
+                report["step"] = 0 if raw_step is None else int(raw_step)
+                report["best"] = None if raw_best is None else float(raw_best)
+            elif payload and any(isinstance(v, torch.Tensor) for v in payload.values()):
+                model_state = payload
+                report["legacy"] = True
+                report["warnings"].append("Legacy bare state_dict checkpoint (no wrapper metadata)")
+                report["step"] = 0
+                report["best"] = None
+            else:
+                missing = [k for k in CheckpointValidator.REQUIRED_CKPT_KEYS if k not in payload]
+                report["missing_keys"] = missing or ["model"]
+                report["error"] = f"Missing required checkpoint keys: {report['missing_keys']}"
                 return report
 
-            report["step"] = int(payload.get("step", 0))
-            report["best"] = float(payload.get("best", float("nan")))
-
             # Check model weights for NaN / Inf
-            model_state = payload.get("model", {})
             param_count = 0
             for name, tensor in model_state.items():
                 if isinstance(tensor, torch.Tensor):
@@ -295,7 +314,7 @@ class CheckpointValidator:
 
     @staticmethod
     def inspect_best_pt(best_path: Path) -> Dict[str, Any]:
-        """Inspect best.pt: verify self-describing dict {'best': float, 'state': dict} [code]."""
+        """Inspect best.pt: verify self-describing dict {'best': float|None, 'state': dict} [code]."""
         report: Dict[str, Any] = {"path": str(best_path), "exists": False, "valid": False, "best": None}
         if not best_path.is_file() or best_path.stat().st_size == 0:
             report["error"] = "best.pt does not exist or is empty"
@@ -309,9 +328,10 @@ class CheckpointValidator:
             except Exception:
                 payload = torch.load(best_path, map_location="cpu")
             if isinstance(payload, dict) and "state" in payload:
-                report["best"] = float(payload.get("best", 0.0))
+                raw_best = payload.get("best")
+                report["best"] = None if raw_best is None else float(raw_best)
                 report["valid"] = True
-            elif isinstance(payload, dict) and any("weight" in k for k in payload.keys()):
+            elif isinstance(payload, dict) and any("weight" in k or isinstance(v, torch.Tensor) for k, v in payload.items()):
                 report["best"] = 0.0
                 report["valid"] = True
             else:

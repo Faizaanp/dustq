@@ -183,9 +183,9 @@ def tier_b_s(seeds: list[int], tuned: dict | None = None) -> list[RunConfig]:
                                        sigmas=sigmas, dust_forward="fake"))
 
     # K=4k fp only, 1 seed (seed 0) [re-cut]
-    lr_4k, mom_4k = _lookup_tuned(tuned, "fp", "dust", None, 1024, "1M")  # inherits K1k multiplier
+    lr_4k, _ = _lookup_tuned(tuned, "fp", "dust", None, 1024, "1M")  # inherits K1k LR; keeps K4k default momentum (0.98)
     cells.append(RunConfig(task="B", size="L4d256", tokens="1M", precision="fp",
-                           method="dust", population=4096, seed=0, lr=lr_4k, momentum=mom_4k,
+                           method="dust", population=4096, seed=0, lr=lr_4k, momentum=None,
                            dust_forward="fake"))
     return cells
 

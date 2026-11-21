@@ -24,8 +24,8 @@ import torch
 from torch import nn
 
 from .dust_ext import DEFAULT_SIGMAS
-from .quant import (QLinear, act_quant_bounds_and_scale, sste_act_quantize,
-                    ste_act_quantize, swap_linear)
+from .quant import (QLinear, _SSTEActQuant, act_quant_bounds_and_scale,
+                    sste_act_quantize, ste_act_quantize, swap_linear)
 
 WEIGHT_QUANT_SITES = ("attn.c_q", "attn.c_k", "attn.c_v", "attn.c_proj", "mlp.c_fc", "mlp.c_proj")
 ACT_QUANT_SITES = WEIGHT_QUANT_SITES  # inputs of the weight-quantized Linears
@@ -168,6 +168,12 @@ def register_act_hooks(model: nn.Module, bits: int, scheme: str = "absmax",
         raise ValueError(f"unknown ste_mode {ste_mode!r}")
     n_layer = n_layer if n_layer is not None else model.config.n_layer
     handles = []
+    # c_q, c_k, c_v in each attention block receive the exact same norm(x) tensor with
+    # identical quantization config (signed, local sigma). Sharing the single quantized
+    # output across c_q -> c_k -> c_v (cleared on c_v) eliminates 2/3 of attention input
+    # quantization overhead and 2/3 of SSTE backward passes on Q/K/V while remaining
+    # mathematically identical.
+    qkv_caches: dict[str, dict] = {}
     for name, module in model.named_modules():
         site = _site_matches(name, ACT_QUANT_SITES)
         if site is None or not isinstance(module, nn.Linear):
@@ -182,8 +188,16 @@ def register_act_hooks(model: nn.Module, bits: int, scheme: str = "absmax",
         if scheme == "mse_alpha" and site_alpha is None:
             site_alpha = calibrated_alpha(bits, unsigned)  # frozen table (Plan v3.1 4.2)
 
+        qkv_cache = None
+        clear_cache = False
+        if site in ("attn.c_q", "attn.c_k", "attn.c_v"):
+            parent_key = name.rsplit(".", 1)[0]
+            qkv_cache = qkv_caches.setdefault(parent_key, {})
+            clear_cache = (site == "attn.c_v")
+
         def make_hook(bits=bits, unsigned=unsigned, scheme=scheme, ste_mode=ste_mode,
-                      sigma=sigma, alpha=site_alpha):
+                      sigma=sigma, alpha=site_alpha, qkv_cache=qkv_cache,
+                      clear_cache=clear_cache):
             def hook(module, args):
                 x = args[0]
                 if not x.is_floating_point():
@@ -194,18 +208,47 @@ def register_act_hooks(model: nn.Module, bits: int, scheme: str = "absmax",
                 # the spy saw x == codes*scale exactly, so every activation sat at its bin
                 # centre instead of a continuous offset in [-0.5, +0.5] of a code).
                 module._act_raw = x.detach()
-                # Stash codes + scale for QLinear's exact path via the shared helper so
-                # stashed values are bit-identical to ste/sste_act_quantize.
+                grad_on = torch.is_grad_enabled()
+                if (
+                    qkv_cache is not None
+                    and qkv_cache.get("x") is x
+                    and qkv_cache.get("ver") == x._version
+                    and qkv_cache.get("grad") == grad_on
+                ):
+                    out = qkv_cache["out"]
+                    module._act_codes = qkv_cache["codes"]
+                    module._act_scale = qkv_cache["scale"]
+                    if clear_cache:
+                        qkv_cache.clear()
+                    return (out,)
+
+                # Compute scale and codes ONCE (shared between exact-path stash and output).
+                xf = x.float()
                 lo, hi, scale = act_quant_bounds_and_scale(
-                    x, bits, unsigned=unsigned, scheme=scheme, alpha=alpha)
-                codes = torch.clamp(torch.round(x.detach().float() / scale), lo, hi)
+                    xf, bits, unsigned=unsigned, scheme=scheme, alpha=alpha)
+                if not grad_on:
+                    codes = torch.clamp(torch.round(xf / scale), lo, hi)
+                    out = codes * scale
+                elif ste_mode == "smoothed":
+                    codes = torch.clamp(torch.round(xf.detach() / scale), lo, hi)
+                    out = _SSTEActQuant.apply(xf, scale, lo, hi, sigma, codes)
+                else:
+                    y = xf / scale
+                    codes = torch.clamp(torch.round(y.detach()), lo, hi)
+                    out = (y + (codes - y).detach()) * scale
+
                 module._act_codes = codes
                 module._act_scale = scale
-                if ste_mode == "smoothed":
-                    out = sste_act_quantize(x, bits, unsigned=unsigned, scheme=scheme,
-                                            sigma=sigma, alpha=alpha)
-                else:
-                    out = ste_act_quantize(x, bits, unsigned=unsigned, scheme=scheme, alpha=alpha)
+                if qkv_cache is not None:
+                    if clear_cache:
+                        qkv_cache.clear()
+                    else:
+                        qkv_cache["x"] = x
+                        qkv_cache["ver"] = x._version
+                        qkv_cache["grad"] = grad_on
+                        qkv_cache["out"] = out
+                        qkv_cache["codes"] = codes
+                        qkv_cache["scale"] = scale
                 return (out,)
             return hook
 

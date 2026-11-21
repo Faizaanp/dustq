@@ -286,7 +286,7 @@ def test_oom_chunk_caching(monkeypatch):
     calls = []
     gc_calls = []
 
-    def fake(model, optimizer, x, y, n):
+    def fake(model, optimizer, x, y, n, dtype="auto"):
         calls.append(n)
         if n == 1:
             raise torch.cuda.OutOfMemoryError("simulated OOM")

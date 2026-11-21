@@ -664,11 +664,65 @@ def probe_sigma_delta(ctx, reference, sigma_fractions=(1 / 8, 1 / 4, 1 / 2, 1, 2
     return out
 
 
+PROBE_SCHEMA_VERSION = 2
+PROBE_SECTION_MAP = {
+    0: "seed_noise",
+    2: "cosine_ladders",
+    3: "ste_bias",
+    4: "directional_descent",
+    5: "sigma_delta",
+}
+# Minimum schema_version required for each probe id before a saved JSON may be treated as DONE
+# (O2 / F2 gate): v2 marks the 2026-11-20 audit fixes (A1/A2 disjoint ladder rung seeds >= 10000,
+# A3/A4 disjoint Probe 4 selection vs 4-batch held-out reporting + multi-seed summary, A5 floor).
+MIN_SCHEMA_BY_PROBE = {0: 1, 1: 1, 2: 2, 3: 1, 4: 2, 5: 1}
+
+
 def probe_report_path(cfg: RunConfig, probes: str | set[int], out: str | Path = "results/probes") -> Path:
     """Canonical output path for a probe run after applying config/CLI overrides."""
     which = {int(p) for p in probes.split(",")} if isinstance(probes, str) else set(probes)
     tag = "-".join(str(p) for p in sorted(which))
     return Path(out) / f"{cfg.run_id}_probes_{tag}.json"
+
+
+def is_probe_report_current(path: str | Path, probes: str | set[int]) -> bool:
+    """Return True iff `path` exists, contains every requested probe section, and meets the
+    minimum schema_version / v2 structural invariants for all requested probes (F2 / O2)."""
+    p = Path(path)
+    if not p.is_file() or p.stat().st_size == 0:
+        return False
+    which = {int(x) for x in probes.split(",") if x.strip()} if isinstance(probes, str) else set(probes)
+    if not which:
+        return False
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+
+    req_keys = [PROBE_SECTION_MAP[w] for w in which if w in PROBE_SECTION_MAP]
+    if not all(k in data for k in req_keys):
+        return False
+
+    req_ver = max(MIN_SCHEMA_BY_PROBE.get(w, 1) for w in which)
+    raw_ver = data.get("schema_version")
+    try:
+        ver = 1 if raw_ver is None else int(raw_ver)
+    except (TypeError, ValueError):
+        return False
+    if ver < req_ver:
+        return False
+
+    # Structural checks for v2 probes so manually edited or partial JSONs cannot slip past
+    if 2 in which:
+        dis = data.get("disattenuation")
+        if not isinstance(dis, dict) or "rung_seeds" not in dis:
+            return False
+    if 4 in which:
+        if "directional_descent_seeds" not in data:
+            return False
+    return True
 
 
 # ---------- CLI (one cell on Colab) ----------
@@ -688,7 +742,7 @@ def main():
         cfg.dust_forward = args.dust_forward
     ctx = ProbeContext(cfg)
     which = {int(p) for p in args.probes.split(",")}
-    report = {}
+    report = {"schema_version": PROBE_SCHEMA_VERSION}
 
     def save() -> None:
         """Write the report so far. Called after every probe so a later crash (or an L4

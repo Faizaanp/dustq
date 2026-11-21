@@ -81,17 +81,47 @@ def test_checkpoint_validator_nan_weights(temp_dir):
 
 
 def test_checkpoint_validator_missing_keys(temp_dir):
+    """F7: unresumable payload (no model weights and not a bare state_dict) must fail."""
     ckpt_path = temp_dir / "ckpt_incomplete.pt"
-    payload = {"model": {"w": torch.ones(2)}}  # missing optimizer, step, etc.
+    payload = {"step": 5, "best": 4.2}  # missing model weights completely
     torch.save(payload, ckpt_path)
 
     report = CheckpointValidator.inspect_checkpoint(ckpt_path)
     assert report["valid"] is False
-    assert "missing_keys" in report
-    assert "optimizer" in report["missing_keys"]
+    assert "model" in report["missing_keys"]
+
+
+def test_checkpoint_validator_legacy_resumable_and_best_none(temp_dir):
+    """F7: legacy-but-resumable checkpoints (missing optimizer/wall_prior, best=None, step=None,
+    or bare state_dict) must stay valid with warnings instead of getting deleted on restart."""
+    ckpt_path = temp_dir / "ckpt_legacy.pt"
+    torch.save({"model": {"w": torch.ones(2)}, "best": None, "step": None}, ckpt_path)
+
+    report = CheckpointValidator.inspect_checkpoint(ckpt_path, is_dust=False)
+    assert report["valid"] is True
+    assert report["legacy"] is True
+    assert report["step"] == 0
+    assert report["best"] is None
+    assert report["warnings"] and "optimizer" in report["warnings"][0]
+
+    # Bare legacy state_dict (as supported by Runner._load_ckpt)
+    bare_path = temp_dir / "ckpt_bare.pt"
+    torch.save({"transformer.wte.weight": torch.ones(4, 4)}, bare_path)
+    bare_report = CheckpointValidator.inspect_checkpoint(bare_path, is_dust=False)
+    assert bare_report["valid"] is True
+    assert bare_report["legacy"] is True
+    assert bare_report["num_params"] == 16
+
+    # best.pt with best=None must not raise TypeError: float(None)
+    best_none = temp_dir / "best_none.pt"
+    torch.save({"best": None, "state": {"w": torch.ones(2)}}, best_none)
+    best_rep = CheckpointValidator.inspect_best_pt(best_none)
+    assert best_rep["valid"] is True
+    assert best_rep["best"] is None
 
 
 def test_checkpoint_validator_dust_generator_requirement(temp_dir):
+    """F7: missing Dust generator logs a legacy warning but does not mark a resumable ckpt invalid."""
     ckpt_path = temp_dir / "ckpt_dust.pt"
     payload = {
         "model": {"w": torch.ones(2)},
@@ -104,14 +134,14 @@ def test_checkpoint_validator_dust_generator_requirement(temp_dir):
     }
     torch.save(payload, ckpt_path)
 
-    # is_dust=False passes
     report_bp = CheckpointValidator.inspect_checkpoint(ckpt_path, is_dust=False)
     assert report_bp["valid"] is True
+    assert report_bp["legacy"] is False
 
-    # is_dust=True fails because generator is required for exact noise stream resumption
     report_dust = CheckpointValidator.inspect_checkpoint(ckpt_path, is_dust=True)
-    assert report_dust["valid"] is False
-    assert any("generator" in k for k in report_dust["missing_keys"])
+    assert report_dust["valid"] is True
+    assert report_dust["legacy"] is True
+    assert any("generator" in w for w in report_dust["warnings"])
 
 
 def test_best_pt_validator(temp_dir):

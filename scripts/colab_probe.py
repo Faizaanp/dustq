@@ -237,23 +237,17 @@ SECTION_MAP = {
 
 
 def is_step_done(run_id: str, which: str) -> bool:
-    """R14: Validate that every expected section is present in the JSON before skipping."""
-    import json
+    """R14 + F2/O2: Validate section presence AND schema_version >= required minimum before skipping."""
+    from dustq.probes import is_probe_report_current
+
     step_probes = {p.strip() for p in which.split(",")}
     if any(p in FORCE_PROBES for p in step_probes):
         return False
     p = json_path(run_id, which)
-    if not p.is_file() or p.stat().st_size == 0:
-        return False
-    try:
-        data = json.loads(p.read_text())
-        req_keys = [SECTION_MAP[int(w)] for w in which.split(",") if int(w) in SECTION_MAP]
-        return all(k in data for k in req_keys)
-    except Exception:
-        return False
+    return is_probe_report_current(p, which)
 
 
-print("\n=== resume plan (done steps are skipped) ===", flush=True)
+print("\n=== resume plan (done steps are skipped; stale pre-v2 probe 2/4 JSONs re-run automatically) ===", flush=True)
 todo = []
 for run_id, which in STEPS:
     done = is_step_done(run_id, which)
@@ -275,6 +269,15 @@ for run_id, which in todo:
 skipped = len(STEPS) - len(todo)
 print(f"\nprobe session complete: {(time.monotonic() - T0) / 3600:.2f} h "
       f"({len(todo)} run, {skipped} skipped as already done)")
+
+# Optional Option-B chaining: set AUTO_RESUME_T7=1 to immediately resume the T7 tuning queue
+# after the clean probe refresh completes.
+if os.environ.get("AUTO_RESUME_T7", "0") == "1":
+    print("\n=== AUTO_RESUME_T7=1: Chaining into Task T7 Tuning Queue ===", flush=True)
+    run_checked([PY, "scripts/make_configs.py", "--tier", "tune", "--out", "configs"])
+    filter_substr = os.environ.get("TUNE_ONLY", "_tune")
+    run_checked([PY, "scripts/run_queue.py", "--only", filter_substr, "--cu-burn-rate", "1.94"])
+    run_checked([PY, "scripts/analyze_tuning.py", "--results-dir", "results", "--out", "results/tune_best_hparams.json"])
 
 # ---- what to read when it finishes ----
 # G2a's criterion (Plan v3.1 section 5) is P3-internal and has two arms:

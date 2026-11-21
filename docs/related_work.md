@@ -473,12 +473,22 @@ is tagged; the report records exactly which engines were used, and which failed.
 
 **Citation status — one arXiv citation now exists, and our old wording was wrong.** The classic
 arXiv full-text endpoint (`search_classic?searchtype=ft`, which the Atom API's `full_text`
-mode cannot do — HTTP 500 since 2026-10-31) returns **one** paper citing Dust:
+mode cannot do — HTTP 500 since 2026-10-31) returns **one** paper citing Dust (this was true until 2026-11-13; see the CORRECTION 2026-11-20 below, and the 2026-11-13 correction on the line following):
 **arXiv:2610.33826v2** "Reactive Optimizers" (Bai, Liang, Teoh, Sitzmann; v1 2026-10-24,
 v2 2026-11-04) [paper, full LaTeX HTML read]. Its bibliography carries the Dust report URL
 verbatim; Dust appears **only in the reference list** (3 occurrences, zero body mentions), and a
 keyword scan for `quantiz|int8|ternary|low-bit|1.58` over the whole paper returns no hits.
-  **CORRECTION 2026-11-13** (WATCH/2026-11-13): "only in the reference list" is **wrong** — a direct re-read of the same v2 HTML found one body-text mention in the Conclusion, keyed "(Dahal et al., 2026)" with no "Dust" string, which the 11-06 Dust-string count could not see. No v3; the paper did not change, our reading did. The quant-keyword scan (0 hits) stands. Corrected wording: **one arXiv citing paper, one passing body-text mention + bibliography entry, no citing paper in our cell.** So:
+  **CORRECTION 2026-11-13** (WATCH/2026-11-13): "only in the reference list" is **wrong** — a direct re-read of the same v2 HTML found one body-text mention in the Conclusion, keyed "(Dahal et al., 2026)" with no "Dust" string, which the 11-06 Dust-string count could not see. No v3; the paper did not change, our reading did. The quant-keyword scan (0 hits) stands.
+  **CORRECTION 2026-11-20** (WATCH/2026-11-20): the count is now **two**, not one. A second
+  arXiv paper cites Dust and, unlike the first, **engages with it as a comparator**:
+  `arXiv:2611.25400` "Dune: A Zeroth-Order Optimizer with Time-Conditioned Historical Error
+  Regression for VLA Test-Time Adaptation" (Dong et al., submitted 2026-11-19), which uses Dust
+  by name in its VLA-TTA discussion. Dune's stated problem — *"zeroth-order methods suffer from
+  high estimation variance under limited perturbation budgets"*, and a theory of "how estimation
+  variance restricts convergence in high-dimensional, small-population regimes" — is exactly the
+  phenomenon our seed-noise floor and sigma-Delta sweep measure. Not in our cell (no
+  quantization, fine-tuning/TTA rather than from-scratch pretraining), but it is useful external
+  corroboration and should be cited as related work. Corrected wording (2026-11-13; count updated 2026-11-20): **two arXiv citing papers - one passing body-text mention (this paper) and one engaged comparator (Dune, 2611.25400) - no citing paper in our cell.** So:
 **one bibliography-only citation, in a paper outside our cell.** `STATUS-2026-11-01.md`'s flat
 "Dust still uncited" is corrected in place with a dated note; OPEN_QUESTIONS #41 carries the
 corrected wording and the standing gate. The gate is **not** closed: Semantic Scholar (5th
@@ -569,3 +579,29 @@ TerMeZO (2026-09-27) still the newest ML entry.
   [unverified]; the Discussions listing rendered GitHub's error blankslate (unreadable, not
   empty); and future citing-paper checks must grep the AUTHOR NAME, not just the "Dust"
   string — that is how the body mention above was missed.
+
+
+### Watch 2026-11-20 additions (verdict **WATCH**; full report at docs/reports/WATCH/2026-11-20.md)
+
+Eighth run (executed directly by the integrating agent; three subagent attempts died mid-stream).
+
+- **Dust now has TWO arXiv citing papers.** `2610.33826v2` (passing body-text mention, keyed
+  "(Dahal et al., 2026)") and the new **`2611.25400` "Dune"** (VLA test-time adaptation,
+  submitted 2026-11-19), which uses Dust **as a comparator**. Dune's central claim - ZO
+  estimation variance restricts convergence at small populations - is the phenomenon our
+  seed-noise floor and sigma-Delta sweep measure. Not in our cell (no quantization, not
+  from-scratch pretraining), but useful corroboration and worth citing.
+- **Noise: PR #58 was CLOSED without merge**, maintainer `serdardoesml` 2026-11-16: *"Closing,
+  seems to be within noise/gains do not reproduce"* - so the rules-boundary question (credit
+  chaining block-by-block, PR #20's territory) was rejected on reproduction grounds and **never
+  adjudicated on the principle**. PR #59 (open) would cut Track-2 to 9.85 s if merged. Record
+  tables and the no-backprop clause unchanged.
+- **JacQuant still v1** (Atom API `<updated>` == `<published>`), so the verbatim charter
+  quotation underpinning the OQ-40 recommendation remains valid.
+- `quant-int8-relay` frozen at `fdaca52` for a month, 0 forks, no second implementation. No new
+  forks. Nothing in our cell.
+- **Blocked (recorded, not null):** Semantic Scholar 429 (seventh consecutive), Google Scholar
+  JS challenge (third consecutive). Both are the channels that catch author-name-keyed citations
+  like Dune. The manual S2/Scholar check is now MORE important, not less.
+- The 11th `qlabs-eng` full-text hit is still unidentified `[unverified]`; paging ignores
+  `startat` without a session qid.

@@ -72,6 +72,16 @@ DRIVE_DATA = drive_root / "dustq" / "data"
 DRIVE_RESULTS = drive_root / "dustq" / "results"
 DRIVE_RESULTS.mkdir(parents=True, exist_ok=True)
 (DRIVE_RESULTS / "probes").mkdir(parents=True, exist_ok=True)
+LOG_FILE = DRIVE_RESULTS / "colab_probe.log"
+
+def log_print(*args, **kwargs):
+    text = " ".join(str(a) for a in args)
+    print(text, flush=True)
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(text + "\n")
+    except Exception:
+        pass
 
 # Robust symlinking: os.path.lexists / unlink prevents FileExistsError on broken symlinks
 for link_name, target in [("data", DRIVE_DATA), ("results", DRIVE_RESULTS)]:
@@ -87,8 +97,9 @@ Path("results/probes").mkdir(parents=True, exist_ok=True)
 
 def run_checked(cmd, **kwargs):
     """Stream stdout/stderr line-by-line so Colab never appears frozen or stalls
-    silently for hours, while retaining full tails for actionable crash diagnostics."""
-    print("RUNNING:", " ".join(str(c) for c in cmd), flush=True)
+    silently for hours, while retaining full tails for actionable crash diagnostics.
+    Also tees output to colab_probe.log on Drive."""
+    log_print("RUNNING:", " ".join(str(c) for c in cmd))
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -100,17 +111,26 @@ def run_checked(cmd, **kwargs):
     )
     lines = []
     if proc.stdout is not None:
+        try:
+            f_log = open(LOG_FILE, "a", encoding="utf-8")
+        except Exception:
+            f_log = None
         for line in iter(proc.stdout.readline, ""):
             print(line, end="", flush=True)
+            if f_log:
+                f_log.write(line)
+                f_log.flush()
             lines.append(line)
             if len(lines) > 2000:
                 lines.pop(0)
         proc.stdout.close()
+        if f_log:
+            f_log.close()
     returncode = proc.wait()
     if returncode != 0:
         tail = "".join(lines[-100:])
-        print(f"\nCOMMAND FAILED (exit {returncode}): {' '.join(str(c) for c in cmd)}", flush=True)
-        print("--- Output Tail ---\n" + tail, flush=True)
+        log_print(f"\nCOMMAND FAILED (exit {returncode}): {' '.join(str(c) for c in cmd)}")
+        log_print("--- Output Tail ---\n" + tail)
         raise SystemExit(f"exit {returncode}; see output above")
     return subprocess.CompletedProcess(cmd, returncode, stdout="".join(lines), stderr="")
 

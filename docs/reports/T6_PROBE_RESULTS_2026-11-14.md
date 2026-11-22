@@ -1,5 +1,7 @@
 # T6 Report — Full Probe Suite & Gate G2a Scientific Results (Colab L4)
 
+> **Rule-6 Dated Notice (2026-11-14 / 2026-11-22):** This initial 2026-11-14 report is **SUPERSEDED** by [`docs/reports/T6_AUDIT_2026-11-14.md`](T6_AUDIT_2026-11-14.md) and [`docs/reports/T6_POST_FIX_RESULTS_2026-11-14.md`](T6_POST_FIX_RESULTS_2026-11-14.md) (updated with 2026-11-22 Schema v2 results). Specifically, the Probe 4 numbers below (`STE: -0.2606`, `Dust1k: -0.2513`) were measured on `ctx.x, ctx.y` before the held-out batch fix, the Table 2.A divisors/`Tok emb` cells had transcription errors, and `K=4096` disattenuated `1.0000` was a shared-seed artifact. Preserved intact below per Rule 6.
+
 **Task**: T6 probe suite (Plan v3.1 section 5, Gate G2a).  
 **Date**: 2026-11-14 `[code]`  
 **Hardware**: NVIDIA L4 GPU (22.0 GB usable VRAM) on Google Colab, session `probe-session`.  

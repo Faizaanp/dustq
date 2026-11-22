@@ -141,20 +141,20 @@ Resumption in Dust-Q is exact and bitwise reproducible `[code]`:
 
 ## 3. Colab CLI Connection Mechanisms
 
-To enable an external autonomous agent (or remote CLI) to inspect, start, steer, and recover Colab sessions, three concrete connection bridges are evaluated and specified:
+To enable an external autonomous agent (or remote CLI) to inspect, start, steer, and recover Colab sessions, four concrete connection bridges are evaluated and specified:
 
 ```
-+-------------------------------------------------------------------------------------------------+
-|                               COLAB CLI CONNECTION ARCHITECTURES                                 |
-+--------------------------------+--------------------------------+-------------------------------+
-|  Method A: SSH / Tunnel Bridge  |  Method B: Async Drive Bridge  | Method C: Headless Enterprise |
-|  (Interactive Remote Shell)    |  (Inbox / Outbox on Drive)     | (Google Cloud Vertex AI)      |
-+--------------------------------+--------------------------------+-------------------------------+
-|  * Cloudflare Tunnel / SSH     |  * Zero open ports             | * REST API / Papermill        |
-|  * Direct bash execution       |  * 100% immune to drops        | * Automatic VM provisioning   |
-|  * Interactive debugging       |  * Native Colab persistence    | * Guaranteed auto-teardown    |
-|  * Requires tunnel alive       |  * 15-30s polling latency      | * Requires GCP Project billing|
-+--------------------------------+--------------------------------+-------------------------------+
++-----------------------------------------------------------------------------------------------------------------------------------+
+|                                                COLAB CLI CONNECTION ARCHITECTURES                                                 |
++---------------------------------+---------------------------------+-------------------------------+-------------------------------+
+|  Method A: SSH / Tunnel Bridge  |  Method B: Async Drive Bridge   | Method C: Headless Enterprise | Method D: Google Colab CLI    |
+|  (Interactive Remote Shell)     |  (Inbox / Outbox on Drive)      | (Google Cloud Vertex AI)      | (Direct Jupyter Runtime Proxy)|
++---------------------------------+---------------------------------+-------------------------------+-------------------------------+
+|  * Cloudflare Tunnel / SSH      |  * Zero open ports              | * REST API / Papermill        | * Official Google SDK / CLI   |
+|  * Direct bash execution        |  * 100% immune to drops         | * Automatic VM provisioning   | * Direct file upload/download |
+|  * Interactive debugging        |  * Native Colab persistence     | * Guaranteed auto-teardown    | * Headless remote script exec |
+|  * Requires tunnel alive        |  * 15-30s polling latency       | * Requires GCP Project billing| * Zero open ports / nat immune|
++---------------------------------+---------------------------------+-------------------------------+-------------------------------+
 ```
 
 ### Method A: SSH / Tunnel Bridge (Direct Interactive Remote Shell)
@@ -335,19 +335,36 @@ gcloud colab enterprise runtimes delete dustq-l4-runtime --region=us-central1 --
 
 ---
 
+### Method D: Google Colab CLI Direct Runtime Proxy Bridge (`google-colab-cli`)
+
+Method D uses Google's official `google-colab-cli` package (`.venv\Scripts\colab.exe`) to interface directly with active Colab notebook runtimes over Google's authenticated reverse proxy `[code]`. It combines the low friction of Method B with the direct programmatic control of Method A without requiring tunnels, open ports, or public SSH keys `[design]`.
+
+#### Architecture & Communication Channels:
+1. **Authentication:** Uses user-level OAuth2 (`~/.colab-cli-oauth-config.json` and cached token).
+2. **Reverse Proxy Infrastructure:** When a user opens a Colab notebook, Google assigns an ephemeral runtime endpoint (e.g. `gpu-l4-s-ass1a0-3qen5nxumoo83`, `Accelerator.L4`). Google exposes this instance via an internal HTTPS proxy (`https://8080-<endpoint>-a.<region>.prod.r.colab.dev`) authenticated with an ephemeral JSON Web Token (`X-Colab-Runtime-Proxy-Token`) with 1-hour expiration `[code]`.
+3. **Dual-Channel Protocol:**
+   - **HTTP Contents Channel (Non-Blocking):** Standard Jupyter contents REST API (`/api/contents/...`). Operates entirely independent of kernel computation state. Used by `colab upload` and `colab download` to stream files, logs, and CSVs without stalling `[code]`.
+   - **Kernel Execution Channel (Serialized):** Standard Jupyter WebSocket execution (`/api/kernels/<kernel_id>/channels`). Used by `colab exec -s <session> -f <script.py>` to submit code directly into the active Python kernel `[code]`.
+
+#### The Jupyter Kernel Execution Serialization Trap:
+> [!CRITICAL]
+> The remote IPython kernel is single-threaded and executes cell/script requests sequentially. Submitting an interactive `colab exec` while a long-running script (such as `colab_probe.py` or `colab_tune.py`) is executing in the foreground **blocks until the running script finishes**. Telemetry monitoring MUST use the non-blocking HTTP Contents Channel (`colab download`), NEVER `colab exec` during active runs `[code]`.
+
+---
+
 ### Architectural Trade-off Evaluation Matrix
 
-| Metric | Method A: SSH / Cloudflare Tunnel | Method B: Async Drive State-Exchange | Method C: Colab Enterprise Headless |
-| :--- | :--- | :--- | :--- |
-| **Reliability** | Medium (Tunnel can drop on reconnect) | **High (100% decouple from transport)** | **Highest (Fully managed cloud SLA)** |
-| **Setup Friction** | Low (Single Colab cell with apt/dpkg) | **Lowest (Pure Python stdlib, zero setup)** | High (Requires GCP Project & IAM setup) |
-| **Firewall / NAT Immunity**| High (Outbound tunnel) | **Absolute (File polling via Drive API)** | High (Cloud API authentication) |
-| **Command Latency** | **Real-time (< 200 ms)** | Low (15–30s polling cycle) | Batch / Job-level (1–3 min spin-up) |
-| **Interactive Debugging** | **Full Bash / GDB / PySpy shell** | Telemetry logs and state files only | Cloud Logging / Stackdriver |
-| **Preemption Resilience** | Zero (Terminal session terminates) | **Perfect (State preserved on Drive)** | Managed (Saved to GCS bucket) |
-| **Budget Safety (Burn Rate)**| Manual watchdog required | **Automated via Harness self-termination**| **Native auto-shutdown policy** |
+| Metric | Method A: SSH / Cloudflare Tunnel | Method B: Async Drive State-Exchange | Method C: Colab Enterprise Headless | Method D: Google Colab CLI (`google-colab-cli`) |
+| :--- | :--- | :--- | :--- | :--- |
+| **Reliability** | Medium (Tunnel drops on reconnect) | **High (100% decouple from transport)** | **Highest (Managed SLA)** | **High (Direct Google reverse proxy)** |
+| **Setup Friction** | Low (Colab cell apt/dpkg) | **Lowest (Pure Python stdlib)** | High (GCP Project & IAM setup) | **Lowest (One-time pip install + OAuth)** |
+| **Firewall / NAT** | High (Outbound tunnel) | **Absolute (Drive API)** | High (Cloud API auth) | **Absolute (Outbound HTTPS reverse proxy)** |
+| **Command Latency**| **Real-time (< 200 ms)** | Low (15–30s polling cycle) | Batch / Job (1–3 min spin-up) | **Real-time (< 500 ms)** |
+| **Interactive** | **Full Bash / GDB shell** | Telemetry logs and state files | Cloud Logging / Stackdriver | **Python script execution & file I/O** |
+| **Preemption** | Zero (Terminal terminates) | **Perfect (State preserved on Drive)**| Managed (Saved to GCS bucket) | **High (Drive results + remote telemetry)** |
+| **Budget Safety** | Manual watchdog required | **Automated via Harness termination** | **Native auto-shutdown policy** | **Instant visibility via CLI / state store** |
 
-**Verdict:** **Method B (Async Drive Bridge)** is the primary, production-grade protocol for autonomous queue training due to its zero external dependencies, absolute network resilience, and seamless integration with existing Drive results storage `[design]`. **Method A** is retained as an interactive fallback for deep debugging sessions `[design]`.
+**Verdict:** **Method D (`google-colab-cli`)** is the primary, production-grade programmatic bridge for external agents to upload code, execute jobs, and pull telemetry `[design]`. **Method B (Async Drive Bridge)** serves as the durable persistent persistence layer on Google Drive, and **Method A** is retained as an interactive fallback for deep debugging sessions `[design]`.
 
 ---
 
@@ -394,84 +411,113 @@ tests/test_harness.py::test_drive_bridge_protocol PASSED                [100%]
 
 ---
 
-## 5. Step-by-Step Operator Guide
+## 5. Step-by-Step Operator Guide & Autonomous Runbooks
 
-### 5.1 One-Time Google Drive Preparation
-Ensure your Google Drive has the necessary data files uploaded to `MyDrive/dustq/data/` `[code]`:
-- `train_1M.pt`
-- `train_10M.pt`
-- `val.pt`
-- `test.pt`
-- `manifest.json`
+This section provides the canonical operational runbook for any human operator or autonomous AI agent working in this repository. Follow these protocols deterministically without needing to search previous conversation histories `[design]`.
 
-### 5.2 Launching on Google Colab (Single Cell)
-1. Open Google Colab and set **Runtime $\rightarrow$ Change runtime type $\rightarrow$ L4 GPU**.
-2. Upload the fresh repository archive `dustq.zip` via the Files panel (always rebuild with `git archive -o dustq.zip HEAD` before uploading `[code]`).
-3. Paste the following bootstrap script into a single cell and execute:
+### 5.1 Pre-requisites & Environment Setup
+1. **Google Drive Topology:** Ensure Drive contains `/MyDrive/dustq/data/` with `train_1M.pt`, `train_10M.pt`, `val.pt`, `test.pt`, and `manifest.json`.
+2. **Local Python Environment:** Ensure `.venv` has `google-colab-cli` installed:
+   ```powershell
+   .venv\Scripts\pip install google-colab-cli
+   ```
+3. **Colab Notebook:** The user opens a Colab notebook (e.g. `https://colab.research.google.com/drive/1YC8aoaTITrm91y_50J45yBtfLb54VKwh`) and connects to an **L4 GPU runtime** (`Runtime -> Change runtime type -> L4 GPU`).
 
+---
+
+### 5.2 Protocol 1: Auto-Attaching to an Active Colab Session
+To connect or re-connect to the active Colab notebook runtime, run:
+```powershell
+.venv\Scripts\python scripts/attach_colab_session.py --session-name tune-session
+```
+What this does automatically:
+1. Queries `state.client.list_assignments()` to find the active assignment (e.g. `gpu-l4-s-...`, `Accelerator.L4`).
+2. Extracts the ephemeral `X-Colab-Runtime-Proxy-Token`, endpoint URL, and expiry time.
+3. Queries `/api/sessions` and `/api/kernels` to bind the active Jupyter kernel ID and session ID.
+4. Registers `tune-session` into `~/.config/colab-cli/sessions.json`.
+5. Verifies registration by listing active sessions via `colab sessions`.
+
+---
+
+### 5.3 Protocol 2: Codebase Packaging & Upload (Deployment)
+Always package and deploy the latest git `HEAD` before launching runs:
+```powershell
+# 1. Rebuild the repository archive from HEAD
+git archive -o dustq.zip HEAD
+
+# 2. Upload archive directly to the Colab VM root
+.venv\Scripts\colab.exe upload -s tune-session dustq.zip /content/dustq.zip
+```
+> [!IMPORTANT]
+> A stale `dustq.zip` produces phantom bugs that look like scientific failures (`AGENTS.md`). Rebuild after every commit!
+
+---
+
+### 5.4 Protocol 3: Probe Suite Execution & Gate G2a Verification (Option B)
+To run the clean probe suite across checkpoints ($P3$, $P0$, $P2$, $P1$, $M$) to produce canonical paper numbers:
+```powershell
+.venv\Scripts\colab.exe exec -s tune-session --timeout 0 -f scripts/colab_probe.py
+```
+**Key Operational Mechanisms:**
+- **Schema v2 Validator (`is_probe_report_current`):** Automatically discards pre-audit JSONs missing `schema_version >= 2` or structural keys `rung_seeds` / `directional_descent_seeds`, while preserving valid `probe 5` runs (saving 40+ minutes).
+- **Drive Log Teeing:** Output is streamed live and appended to `/content/drive/MyDrive/dustq/results/colab_probe.log`.
+- **Gate G2a Criteria Checklist (`Plan v3.1 §5`):**
+  1. **Arm 1 (Monotonic Ladder Rise):** In `results/probes/*_probes_*.json` (`cosine_ladders`), cosine similarity between Dust-$K$ and reference must rise monotonically across $K \in \{256, 1024, 4096\}$ on key writer groups (`MLP in`, `MLP out`, `Attn out`).
+  2. **Arm 2 (Directional Descent):** In `results/probes/*_probes_4.json` (`directional_descent`), descent along Dust-1k direction must yield $\Delta L_q < 0$ on both train and held-out validation sets across all seeds.
+
+---
+
+### 5.5 Protocol 4: Task T7 Hyperparameter Tuning Queue Execution
+Once G2a is verified, execute or resume the Task T7 tuning queue (114 runs on $S/1M$, seeds 100+):
+```powershell
+.venv\Scripts\colab.exe exec -s tune-session --timeout 0 -f scripts/colab_tune.py
+```
+**Key Operational Mechanisms:**
+- **Idempotent Queue Resumption:** Checks `/content/drive/MyDrive/dustq/results/runs.csv`. Any run with `status == "completed"` is instantly skipped.
+- **L4 Speedups Active:** Evaluates $w1.58a4$ and $w1.58a2$ at ~17 s/step (vs 27–35 s/step previously), and $w1.58a8$ BP at 0.31 s/step (vs 8.4 s/step previously).
+- **Rule 2 Compliance:** Hyperparameters are selected strictly by validation loss (`val_loss_best`), never test loss.
+- **Automated Summary:** Automatically executes `scripts/analyze_tuning.py` upon queue completion to dump `results/tune_best_hparams.json`.
+
+---
+
+### 5.6 Protocol 5: Non-Blocking Telemetry & Hourly Monitoring Daemon
+During long-running probe or tuning sessions, monitor execution non-blockingly without stalling the Jupyter kernel:
+```powershell
+.venv\Scripts\python scripts/check_colab_status.py
+```
+**Why this works without deadlock:**
+- Calls `colab download` (HTTP Contents API) to pull `colab_probe.log`, `colab_tune.log`, and `runs.csv`.
+- Never issues `colab exec` while the kernel is computing.
+- Automatically refreshes the OAuth proxy token if Google rotates it mid-run.
+
+**Hourly Daemon Setup:**
+To establish recurring monitoring every hour, schedule via the agent harness:
 ```python
-# =====================================================================
-# Dust-Q Autonomous Training Session Bootstrap
-# =====================================================================
-import os, sys, subprocess, zipfile
-from pathlib import Path
-
-# 1. Mount Google Drive
-from google.colab import drive
-drive.mount("/content/drive")
-
-# 2. Extract repository
-REPO_ZIP = "/content/dustq.zip"
-assert os.path.exists(REPO_ZIP), "Upload dustq.zip to /content before running."
-with zipfile.ZipFile(REPO_ZIP) as z:
-    z.extractall("/content/dustq-repo")
-
-base = Path("/content/dustq-repo")
-root = next(p for p in [base] + [q for q in base.iterdir() if q.is_dir()] if (p / "dustq").is_dir())
-os.chdir(root)
-print("Working directory:", root)
-
-# 3. Install runtime requirements
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "pyyaml", "pytest"], check=True)
-
-# 4. Launch Autonomous Harness in Queue Mode with Watchdog
-cmd = [
-    sys.executable, "scripts/colab_autonomous_harness.py",
-    "--mode", "queue",
-    "--cu-burn-rate", "1.94",
-    "--watchdog-interval", "20",
-    "--stall-timeout", "300"
-]
-print("Executing autonomous harness:", " ".join(cmd), flush=True)
-subprocess.run(cmd, check=True)
+schedule(
+    CronExpression="0 * * * *",
+    IsDaemon=True,
+    Prompt="Hourly status check: run scripts/check_colab_status.py, report probe/tune metrics, and progress queue."
+)
 ```
 
-### 5.3 External Agent / Remote Monitoring (Drive Bridge Mode)
-To monitor and steer Colab from a local machine or remote agent without maintaining an open browser tab:
-1. **Check Real-Time Status:**
-   Read `MyDrive/dustq/bridge/heartbeat.json`:
-   ```bash
-   cat "G:/My Drive/dustq/bridge/heartbeat.json"
-   ```
-2. **Dispatch New Command to Colab:**
-   Drop a JSON command file into `MyDrive/dustq/bridge/inbox/cmd_01.json`:
-   ```json
-   {
-     "action": "RUN_CONFIG",
-     "params": {
-       "config": "L4d256_1M_w1p58a4_dust_K256_s0.yaml"
-     }
-   }
-   ```
-3. **Inspect Incident Reports:**
-   If a run fails, the harness dumps `MyDrive/dustq/bridge/outbox/incident_*.json` and the full traceback in `results/<run_id>/FAILED_TRACEBACK.txt`.
+---
 
-### 5.4 Automatic Shutdown & Budget Protection
-When running long overnight queues, add the following snippet to the end of the Colab execution cell to automatically release the runtime and cease burning compute units once work completes `[design]`:
+### 5.7 Protocol 6: Troubleshooting & Diagnostic Recovery
 
+| Incident / Error | Root Cause | Remediation Procedure |
+| :--- | :--- | :--- |
+| **`Read timed out` on Jupyter REST endpoints** | Kernel is busy executing heavy compute cell in foreground | Expected behavior. Do not restart kernel. Use `scripts/check_colab_status.py` (HTTP contents API) to check progress. |
+| **`404 Not Found` or session disappears** | Colab runtime preemption or tab idle disconnect | Run `.venv\Scripts\python scripts/attach_colab_session.py` to rebind new runtime assignment. |
+| **Token expired (`401 Unauthorized`)** | Google proxy JWT reached 1-hour expiry | Run `scripts/attach_colab_session.py` or `scripts/check_colab_status.py`; both auto-update proxy token. |
+| **PowerShell command quoting corruption** | Windows PowerShell parses quotes inside `-c "..."` unpredictably | **NEVER** use inline python quotes. Always put code in a `.py` file and execute via `-f <script.py>`. For git, always use `git commit -F <file>`. |
+| **Checkpoint validation rejects legacy ckpt** | `CheckpointValidator` requiring missing non-essential keys | Aligned in F7: `REQUIRED_CKPT_KEYS = {"model"}`. Resumable legacy checkpoints continue cleanly. |
+
+---
+
+### 5.8 Automatic Teardown & Budget Protection (End of Session)
+When all queues are complete, unassign the runtime from Colab or via script to stop CU consumption (1.94 CU/h):
 ```python
 from google.colab import runtime
-print("Queue completed successfully. Ceasing CU burn by unassigning runtime.")
 runtime.unassign()
 ```
 

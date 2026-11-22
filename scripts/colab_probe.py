@@ -290,9 +290,9 @@ skipped = len(STEPS) - len(todo)
 print(f"\nprobe session complete: {(time.monotonic() - T0) / 3600:.2f} h "
       f"({len(todo)} run, {skipped} skipped as already done)")
 
-# Optional Option-B chaining: set AUTO_RESUME_T7=1 to immediately resume the T7 tuning queue
+# Option-B chaining: default to AUTO_RESUME_T7=1 to immediately resume the T7 tuning queue
 # after the clean probe refresh completes.
-if os.environ.get("AUTO_RESUME_T7", "0") == "1":
+if os.environ.get("AUTO_RESUME_T7", "1") == "1":
     print("\n=== AUTO_RESUME_T7=1: Chaining into Task T7 Tuning Queue ===", flush=True)
     run_checked([PY, "scripts/make_configs.py", "--tier", "tune", "--out", "configs"])
     filter_substr = os.environ.get("TUNE_ONLY", "_tune")

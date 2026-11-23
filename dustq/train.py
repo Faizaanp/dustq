@@ -284,8 +284,13 @@ class Runner:
                     self._flush_best(best)
                     self._save_ckpt(step, best, history)
                     t_ckpt = time.monotonic()
-                with history_path.open("a") as stream:
-                    stream.write(json.dumps(record) + "\n")
+                try:
+                    with history_path.open("a") as stream:
+                        stream.write(json.dumps(record) + "\n")
+                except FileNotFoundError:
+                    self.run_dir.mkdir(parents=True, exist_ok=True)
+                    with history_path.open("a") as stream:
+                        stream.write(json.dumps(record) + "\n")
         finally:
             if self.estimator is not None:
                 try:

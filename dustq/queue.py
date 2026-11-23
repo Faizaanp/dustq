@@ -86,7 +86,7 @@ def _attempts(run_dir: Path) -> int:
 def run_queue(configs_dir, results_dir="results", only: str | None = None,
               cu_burn_rate: str = "", retry_failed: bool = False,
               exact: bool = False) -> list[str]:
-    configs_dir, results_dir = Path(configs_dir), Path(results_dir)
+    configs_dir, results_dir = Path(configs_dir).resolve(), Path(results_dir).resolve()
     results_dir.mkdir(parents=True, exist_ok=True)
     csv_path = results_dir / "runs.csv"
     done, statuses = [], []
@@ -121,13 +121,16 @@ def run_queue(configs_dir, results_dir="results", only: str | None = None,
             done.append(cfg.run_id)
         except Exception as exc:  # log the failure, keep the queue moving
             note = f"{type(exc).__name__}: {exc}"
-            run_dir.mkdir(parents=True, exist_ok=True)
-            (run_dir / FAILED_MARKER).write_text(f"{_attempts(run_dir) + 1}\n{note}\n")
-            # Full stack for the next debugging session; keep the tail (the failing frames
-            # are at the end). The 500-char CSV note truncated exactly the frames that
-            # identified the eval-grads OOM and cost a day of wrong root-causing.
-            (run_dir / "FAILED_TRACEBACK.txt").write_text(
-                "".join(traceback.format_exception(exc))[-20000:])
+            try:
+                run_dir.mkdir(parents=True, exist_ok=True)
+                (run_dir / FAILED_MARKER).write_text(f"{_attempts(run_dir) + 1}\n{note}\n")
+                # Full stack for the next debugging session; keep the tail (the failing frames
+                # are at the end). The 500-char CSV note truncated exactly the frames that
+                # identified the eval-grads OOM and cost a day of wrong root-causing.
+                (run_dir / "FAILED_TRACEBACK.txt").write_text(
+                    "".join(traceback.format_exception(exc))[-20000:])
+            except Exception as log_exc:
+                print(f"[queue] Warning: failed to write failure markers in {run_dir}: {log_exc}", flush=True)
             _append_csv_row(csv_path, _row_from(cfg, {}, "failed", notes=note[:500]))
             traceback.print_exc()
             statuses.append(f"FAILED {cfg.run_id}: {note}")
